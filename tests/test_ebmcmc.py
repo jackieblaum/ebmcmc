@@ -1,7 +1,7 @@
 import pytest
 from unittest.mock import MagicMock, patch
 import phoebe
-import pymc3 as pm
+import pymc as pm
 import numpy as np
 from ebmcmc import EBMCMC
 
