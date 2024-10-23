@@ -2,7 +2,7 @@ import phoebe
 import pymc as pm
 import numpy as np
 import os
-import theano.tensor as tt
+import aesara
 import scipy.optimize
 import arviz as az
 import pyphot
@@ -13,7 +13,7 @@ import xarray as xr
 import pickle
 import logging
 from tqdm import tqdm
-
+import binarysed
 
 class EBMCMC:
     """
@@ -168,17 +168,17 @@ class EBMCMC:
             )
 
             # Compute semi-major axis using inclination
-            sma = asini / tt.sin(incl * (2 * np.pi) / 360)
+            sma = asini / np.sin(incl * (2 * np.pi) / 360)
 
             # Masses from Kepler's third law
             mass_primary = (
                 39.478418
-                * (asini / tt.sin(incl * (2 * np.pi) / 360)) ** 3
+                * (asini / np.sin(incl * (2 * np.pi) / 360)) ** 3
                 / (period**2 * (q + 1))
             )
             mass_secondary = (
                 39.478418
-                * (asini / tt.sin(incl * (2 * np.pi) / 360)) ** 3
+                * (asini / np.sin(incl * (2 * np.pi) / 360)) ** 3
                 / (period**2 * (1 / q + 1))
             )
 
@@ -250,7 +250,7 @@ class EBMCMC:
                 )
 
             loglike = Loglike(self.data_dict)
-            params = tt.as_tensor_variable(fit_params)
+            params = aesara.tensor.as_tensor_variable(fit_params)
             pm.Potential("like", loglike(params))
 
     def sample(self, ndraws=1000, cores=256, tune_steps=1000, continue_sampling=True, target_accept=0.9):
@@ -424,7 +424,7 @@ class EBMCMC:
 
             # SED handling
             if "sed" in self.data_dict:
-                sed_obj = sed.SED(self.data_dict["sed"])
+                sed_obj = binarysed.SED(self.data_dict["sed"])
                 teff_primary = self.bundle.get_value("teff@primary@component")
                 teff_secondary = self.bundle.get_value("teff@secondary@component")
                 requiv_primary = self.bundle.get_value("requiv@primary@component")
