@@ -253,7 +253,7 @@ class EBMCMC:
             params = tt.as_tensor_variable(fit_params)
             pm.Potential("like", loglike(params))
 
-    def sample(self, ndraws=1000, cores=256, tune_steps=1000, continue_sampling=True):
+    def sample(self, ndraws=1000, cores=256, tune_steps=1000, continue_sampling=True, target_accept=0.9):
         """
         Performs MCMC sampling using PyMC3.
 
@@ -276,7 +276,7 @@ class EBMCMC:
 
         with self.model:
             trace = pm.sample(
-                draws=ndraws, cores=cores, tune=tune_steps, progressbar=True
+                draws=ndraws, cores=cores, tune=tune_steps, progressbar=True, target_accept=target_accept
             )
             self.save_trace(trace)
 
