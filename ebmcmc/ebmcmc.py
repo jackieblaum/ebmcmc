@@ -1,5 +1,5 @@
 import phoebe
-import pymc3 as pm
+import pymc as pm
 import numpy as np
 import os
 import theano.tensor as tt
