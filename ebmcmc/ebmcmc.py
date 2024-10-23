@@ -137,10 +137,10 @@ class EBMCMC:
 
         with pm.Model() as self.model:
             # Priors for various parameters
-            period = pm.Normal('period@binary@component', mu=period_init, sigma=period_init * 0.1)
-            q = pm.Bound(pm.Normal, lower=0.1, upper=1)('q@binary@component', mu=q_init, sigma=q_init * 0.1)
-            incl = pm.Uniform('incl@binary@component', lower=1, upper=90, testval=incl_init)
-            asini = pm.Bound(pm.Normal, lower=0.01, upper=1000)('asini@binary@component', mu=asini_init, sigma=asini_init * 0.1)
+            period = pm.TruncatedNormal('period@binary@component', lower=0, mu=period_init, sigma=period_init * 0.1)
+            q = pm.TruncatedNormal('q@binary@component', lower=0.1, upper=1, mu=q_init, sigma=q_init * 0.1)
+            incl = pm.Uniform('incl@binary@component', lower=1, upper=90, initval=incl_init)
+            asini = pm.TruncatedNormal('asini@binary@component', lower=0.01, upper=1000, mu=asini_init, sigma=asini_init * 0.1)
 
             # Compute semi-major axis using inclination
             sma = asini / tt.sin(incl * (2 * np.pi) / 360)
@@ -150,16 +150,16 @@ class EBMCMC:
             mass_secondary = 39.478418 * (asini / tt.sin(incl * (2 * np.pi) / 360)) ** 3 / (period ** 2 * (1 / q + 1))
 
             # Radii priors
-            requiv_secondary = pm.Uniform('requiv@secondary@component', lower=0.1, upper=3, testval=requiv_secondary_init)
-            requivsumfrac = pm.Uniform('requivsumfrac@binary@component', lower=0.01, upper=0.5, testval=requivsumfrac_init)
+            requiv_secondary = pm.Uniform('requiv@secondary@component', lower=0.1, upper=3, initval=requiv_secondary_init)
+            requivsumfrac = pm.Uniform('requivsumfrac@binary@component', lower=0.01, upper=0.5, initval=requivsumfrac_init)
 
             # Temperature priors
-            teff_secondary = pm.Uniform('teff@secondary@component', lower=3500, upper=50000, testval=teff_secondary_init)
-            teffratio = pm.Uniform('teffratio@binary@component', lower=0.7, upper=1.2, testval=teffratio_init)
+            teff_secondary = pm.Uniform('teff@secondary@component', lower=3500, upper=50000, initval=teff_secondary_init)
+            teffratio = pm.Uniform('teffratio@binary@component', lower=0.7, upper=1.2, initval=teffratio_init)
 
             # Eccentricity and periastron
             if self.ecc:
-                ecc = pm.Beta('ecc@binary@component', alpha=1, beta=5, testval=ecc_init)
+                ecc = pm.Beta('ecc@binary@component', alpha=1, beta=5, initval=ecc_init)
                 per0_rad = pm.VonMises('per0@rad', mu=per0_init * (2 * np.pi) / 360, kappa=1)
                 per0 = pm.Deterministic('per0@binary@component', 360 / (2 * np.pi) * per0_rad)
             else:
@@ -167,7 +167,7 @@ class EBMCMC:
                 per0 = 0
 
             # Noise parameter (sigma_lnf)
-            sigma_lnf = pm.Uniform('sigma_lnf', lower=-15, upper=-1)
+            sigma_lnf = pm.Uniform('sigma_lnf', lower=-15, upper=-1)x
 
             # Likelihood definition
             fit_params = [
@@ -180,7 +180,7 @@ class EBMCMC:
 
             # Adding primary luminosities
             for i, pblum in enumerate(pblums_init):
-                fit_params.append(pm.Bound(pm.Normal, lower=0)(f'pblum@primary@{i}@dataset', mu=pblum, sigma=0.01))
+                fit_params.append(pm.TruncatedNormal(f'pblum@primary@{i}@dataset', lower=0, mu=pblum, sigma=0.01))
 
             loglike = Loglike(self.data_dict)
             params = tt.as_tensor_variable(fit_params)
