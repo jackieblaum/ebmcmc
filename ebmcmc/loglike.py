@@ -1,9 +1,9 @@
 import numpy as np
-import aesara
+import pytensor.tensor as pt
 import phoebe
 
 
-class Loglike(aesara.tensor.Op):
+class Loglike(pt.Op):
     """
     Theano Op class for integrating a custom log-likelihood function with PyMC3.
 
@@ -12,8 +12,8 @@ class Loglike(aesara.tensor.Op):
         loglike_grad (LoglikeGrad): An instance of the LoglikeGrad class for gradient calculation.
     """
 
-    itypes = [aesara.tensor.dvector]  # Input types (list of parameters as a vector)
-    otypes = [aesara.tensor.dscalar]  # Output types (log-likelihood as a scalar)
+    itypes = [pt.dvector]  # Input types (list of parameters as a vector)
+    otypes = [pt.dscalar]  # Output types (log-likelihood as a scalar)
 
     def __init__(self, data_dict):
         """
@@ -37,7 +37,7 @@ class Loglike(aesara.tensor.Op):
         # Unpack the input parameters
         params = (
             inputs[0]
-            if not isinstance(inputs[0], aesara.tensor.TensorVariable)
+            if not isinstance(inputs[0], pt.TensorVariable)
             else inputs[0].eval()
         )
 
@@ -63,7 +63,7 @@ class Loglike(aesara.tensor.Op):
         return [grad_outputs[0] * grads]
 
 
-class LoglikeGrad(aesara.tensor.Op):
+class LoglikeGrad(pt.Op):
     """
     Theano Op class for computing the gradient of the log-likelihood function.
 
@@ -71,8 +71,8 @@ class LoglikeGrad(aesara.tensor.Op):
         data_dict (dict): A dictionary containing the observed data.
     """
 
-    itypes = [aesara.tensor.dvector]  # Input types (list of parameters as a vector)
-    otypes = [aesara.tensor.dvector]  # Output types (gradients as a vector)
+    itypes = [pt.dvector]  # Input types (list of parameters as a vector)
+    otypes = [pt.dvector]  # Output types (gradients as a vector)
 
     def __init__(self, data_dict):
         """

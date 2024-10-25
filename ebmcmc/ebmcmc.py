@@ -2,11 +2,10 @@ import phoebe
 import pymc as pm
 import numpy as np
 import os
-import aesara
+import pytensor.tensor as pt
 import scipy.optimize
 import arviz as az
 import pyphot
-from eblfi import sed, utils
 from datetime import datetime
 import matplotlib.pyplot as plt
 import xarray as xr
@@ -14,26 +13,17 @@ import pickle
 import logging
 from tqdm import tqdm
 import binarysed
+from ebmcmc.loglike import Loglike
+
 
 class EBMCMC:
     """
-    A class for performing Markov Chain Monte Carlo (MCMC) sampling on binary star systems using PHOEBE and PyMC3.
+    A class for performing Markov Chain Monte Carlo (MCMC) sampling on binary star systems using PHOEBE and pymc.
     """
 
     def __init__(
         self, bundle, trace_dir=None, sed=None, datasets=None, eclipsing=True, ecc=True
     ):
-        """
-        Initializes the MCMCPyMC object with a PHOEBE bundle and optional datasets/SED.
-
-        Args:
-            bundle (phoebe.Bundle): A PHOEBE bundle object.
-            trace_dir (str, optional): Directory for saving trace files. Defaults to None.
-            sed (dict, optional): A dictionary containing SED data (wavelengths, fluxes, etc.). Defaults to None.
-            datasets (list, optional): List of datasets for the model. Defaults to all datasets in the bundle.
-            eclipsing (bool, optional): Whether the system is eclipsing. Defaults to True.
-            ecc (bool, optional): Whether the system is eccentric. Defaults to True.
-        """
         self.bundle = bundle
         self.sed = sed
         self.model = None
@@ -54,27 +44,18 @@ class EBMCMC:
         self.bundle.set_value_all("pblum_mode", "component-coupled")
 
     def initialize_logging(self):
-        """Initializes logging for PHOEBE and PyMC3."""
+        """Initializes logging for PHOEBE and pymc."""
         phoebe_logger = phoebe.logger(
             clevel=None, flevel="CRITICAL", filename="phoebe.log"
         )
         phoebe_logger.propagate = False
         phoebe.progressbars_off()
 
-        pymc3_logger = logging.getLogger("pymc3")
-        pymc3_logger.setLevel(logging.INFO)
-        pymc3_logger.propagate = True
+        pymc_logger = logging.getLogger("pymc")
+        pymc_logger.setLevel(logging.INFO)
+        pymc_logger.propagate = True
 
     def create_data_dict(self, datasets=None):
-        """
-        Creates a dictionary of the observed data from the PHOEBE bundle and SED if provided.
-
-        Args:
-            datasets (list, optional): A list of datasets to be used. Defaults to all datasets in the bundle.
-
-        Returns:
-            dict: A dictionary containing the observed data.
-        """
         data_dict = {}
         if datasets is None:
             datasets = self.bundle.datasets
@@ -93,7 +74,6 @@ class EBMCMC:
         return data_dict
 
     def extract_light_curve_data(self, dataset):
-        """Extracts light curve data from the bundle."""
         times = self.bundle.get_value(f"times@{dataset}@dataset")
         self.min_time, self.max_time = min(self.min_time, np.min(times)), max(
             self.max_time, np.max(times)
@@ -105,7 +85,6 @@ class EBMCMC:
         }
 
     def extract_rv_data(self, dataset):
-        """Extracts radial velocity data from the bundle."""
         primary_times = self.bundle.get_value(f"times@{dataset}@primary@dataset")
         secondary_times = self.bundle.get_value(f"times@{dataset}@secondary@dataset")
         return {
@@ -118,9 +97,6 @@ class EBMCMC:
         }
 
     def define_model(self):
-        """
-        Defines the PyMC3 model for the MCMC sampling.
-        """
         period_init = self.bundle.get_value("period@binary@component")
         m1 = self.bundle.get_value("mass@primary@component")
         m2 = self.bundle.get_value("mass@secondary@component")
@@ -138,7 +114,6 @@ class EBMCMC:
             if dataset.startswith("lc")
         ]
 
-        # Flip primary and secondary stars if necessary to confine q <= 1
         if q_init > 1:
             q_init = m1 / m2
             requiv_secondary_init = self.bundle.get_value("requiv@primary@component")
@@ -146,7 +121,7 @@ class EBMCMC:
             requiv_secondary_init = self.bundle.get_value("requiv@secondary@component")
 
         with pm.Model() as self.model:
-            # Priors for various parameters
+            # Define priors
             period = pm.TruncatedNormal(
                 "period@binary@component",
                 lower=0,
@@ -166,11 +141,8 @@ class EBMCMC:
                 mu=asini_init,
                 sigma=asini_init * 0.1,
             )
-
-            # Compute semi-major axis using inclination
             sma = asini / np.sin(incl * (2 * np.pi) / 360)
 
-            # Masses from Kepler's third law
             mass_primary = (
                 39.478418
                 * (asini / np.sin(incl * (2 * np.pi) / 360)) ** 3
@@ -182,7 +154,6 @@ class EBMCMC:
                 / (period**2 * (1 / q + 1))
             )
 
-            # Radii priors
             requiv_secondary = pm.Uniform(
                 "requiv@secondary@component",
                 lower=0.1,
@@ -196,7 +167,6 @@ class EBMCMC:
                 initval=requivsumfrac_init,
             )
 
-            # Temperature priors
             teff_secondary = pm.Uniform(
                 "teff@secondary@component",
                 lower=3500,
@@ -210,7 +180,6 @@ class EBMCMC:
                 initval=teffratio_init,
             )
 
-            # Eccentricity and periastron
             if self.ecc:
                 ecc = pm.Beta("ecc@binary@component", alpha=1, beta=5, initval=ecc_init)
                 per0_rad = pm.VonMises(
@@ -223,10 +192,8 @@ class EBMCMC:
                 ecc = 0
                 per0 = 0
 
-            # Noise parameter (sigma_lnf)
             sigma_lnf = pm.Uniform("sigma_lnf", lower=-15, upper=-1)
 
-            # Likelihood definition
             fit_params = [
                 teffratio,
                 incl,
@@ -241,7 +208,6 @@ class EBMCMC:
             if self.ecc:
                 fit_params.extend([ecc, per0])
 
-            # Adding primary luminosities
             for i, pblum in enumerate(pblums_init):
                 fit_params.append(
                     pm.TruncatedNormal(
@@ -250,48 +216,36 @@ class EBMCMC:
                 )
 
             loglike = Loglike(self.data_dict)
-            params = aesara.tensor.as_tensor_variable(fit_params)
+            params = pt.as_tensor_variable(fit_params)
+            for param in fit_params:
+                print(f"Type of param: {type(param)}")
+
+            # params = pt.stack(fit_params)
             pm.Potential("like", loglike(params))
 
-    def sample(self, ndraws=1000, cores=256, tune_steps=1000, continue_sampling=True, target_accept=0.9):
-        """
-        Performs MCMC sampling using PyMC3.
-
-        Args:
-            ndraws (int): Number of draws to sample.
-            cores (int): Number of cores to use.
-            tune_steps (int): Number of tuning steps.
-            continue_sampling (bool): Whether to continue from previous sampling. Defaults to True.
-
-        Returns:
-            pm.backends.base.MultiTrace: The trace object containing the samples.
-        """
+    def sample(self, ndraws=1000, cores=4, tune_steps=1000, target_accept=0.9):
         if self.model is None:
             self.define_model()
 
-        old_trace_chains = self.load_full_trace_states()
-        if old_trace_chains and self.check_convergence(old_trace_chains):
-            print("Trace already converged.")
-            return old_trace_chains
-
         with self.model:
             trace = pm.sample(
-                draws=ndraws, cores=cores, tune=tune_steps, progressbar=True, target_accept=target_accept
+                draws=ndraws, cores=cores, tune=tune_steps, target_accept=target_accept
             )
             self.save_trace(trace)
 
         return trace
 
     def save_trace(self, trace):
-        """Saves the trace to a specified directory."""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         run_dir = os.path.join(self.trace_dir, f"run_{timestamp}")
         os.makedirs(run_dir, exist_ok=True)
 
-        for chain_idx in range(trace.nchains):
+        for chain_idx in range(trace.posterior.chain.size):
             filename = f"trace_chain_{chain_idx}.nc"
-            idata = az.from_pymc3(trace, chain_idx=chain_idx)
-            az.to_netcdf(idata, os.path.join(run_dir, filename))
+            az.to_netcdf(trace.sel(chain=chain_idx), os.path.join(run_dir, filename))
+
+    # Other functions remain the same, adjusted for updated syntax where needed
+
 
     def load_full_trace_states(self, truncate=False):
         """
