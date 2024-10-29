@@ -217,8 +217,6 @@ class EBMCMC:
 
             loglike = Loglike(self.data_dict)
             params = pt.as_tensor_variable(fit_params)
-            for param in fit_params:
-                print(f"Type of param: {type(param)}")
 
             # params = pt.stack(fit_params)
             pm.Potential("like", loglike(params))
