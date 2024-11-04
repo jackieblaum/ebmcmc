@@ -142,15 +142,18 @@ def lnlikelihood(params, data_dict):
     )
     b.flip_constraint("asini@binary@constraint", solve_for="sma@binary@component")
 
-    b.set_value("teffratio@binary@component", teffratio)
-    b.set_value("incl@binary@component", incl)
-    b.set_value("requivsumfrac@binary@component", requivsumfrac)
-    b.set_value("requiv@secondary@component", requiv_secondary)
-    b.set_value("q@binary@component", q)
-    b.set_value("t0_supconj@binary@component", t0_supconj)
-    b.set_value("asini@binary@component", asini)
-    b.set_value("teff@secondary@component", teff_secondary)
-    b.set_value("period@binary@component", period)
+    try:
+        b.set_value("teffratio@binary@component", teffratio)
+        b.set_value("incl@binary@component", incl)
+        b.set_value("requivsumfrac@binary@component", requivsumfrac)
+        b.set_value("requiv@secondary@component", requiv_secondary)
+        b.set_value("q@binary@component", q)
+        b.set_value("t0_supconj@binary@component", t0_supconj)
+        b.set_value("asini@binary@component", asini)
+        b.set_value("teff@secondary@component", teff_secondary)
+        b.set_value("period@binary@component", period)
+    except:
+        return -np.inf
 
     # print(b['teff@primary@component'], b['teff@secondary@component'])
     # print(b['logg@primary@component'], b['logg@secondary@component'])
