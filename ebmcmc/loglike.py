@@ -1,107 +1,73 @@
-import numpy as np
-import pytensor.tensor as pt
-import binarysed
 import phoebe
-import scipy
+import numpy as np
+import binarysed
 
-
-class Loglike(pt.Op):
+def lnprob(params, data_dict, q_init, period_init, sigma_lnf_range, t0_range, ecc_bool):
     """
-    Theano Op class for integrating a custom log-likelihood function with PyMC3.
-
-    Attributes:
+    Computes the log-probability by combining the log-prior and the log-likelihood.
+    
+    Args:
+        params (list): A list of model parameters.
         data_dict (dict): A dictionary containing the observed data.
-        loglike_grad (LoglikeGrad): An instance of the LoglikeGrad class for gradient calculation.
+        q_init (float): Initial estimate for q.
+        period_init (float): Initial estimate for period.
+        sigma_lnf_range (tuple): Range for sigma_lnf.
+    
+    Returns:
+        float: The combined log-probability.
     """
+    lp = lnprior(params, q_init, period_init, sigma_lnf_range, t0_range, ecc_bool)
+    if not np.isfinite(lp):
+        return -np.inf
+    return lp + lnlikelihood(params, data_dict)
 
-    itypes = [pt.dvector]  # Input types (list of parameters as a vector)
-    otypes = [pt.dscalar]  # Output types (log-likelihood as a scalar)
-
-    def __init__(self, data_dict):
-        """
-        Initializes the Loglike Op with a data dictionary.
-
-        Args:
-            data_dict (dict): A dictionary containing the observed data.
-        """
-        self.data_dict = data_dict
-        self.loglike_grad = LoglikeGrad(data_dict)
-
-    def perform(self, node, inputs, outputs):
-        """
-        Performs the log-likelihood calculation.
-
-        Args:
-            node: Theano node containing information about the function call.
-            inputs: List of input parameters for the log-likelihood function.
-            outputs: List of output objects to store the computed log-likelihood.
-        """
-        # Unpack the input parameters
-        params = (
-            inputs[0]
-            if not isinstance(inputs[0], pt.TensorVariable)
-            else inputs[0].eval()
-        )
-
-        # Compute the log-likelihood using the custom function
-        logp = lnlikelihood(params, self.data_dict)
-
-        # Store the result in outputs
-        outputs[0][0] = np.array(logp)
-
-    def grad(self, inputs, grad_outputs):
-        """
-        Computes the gradient of the log-likelihood function with respect to the parameters.
-
-        Args:
-            inputs: List of input parameters for which gradients are to be computed.
-            grad_outputs: List of gradients passed from PyMC3.
-
-        Returns:
-            list: Gradients of the log-likelihood with respect to the inputs.
-        """
-        (theta,) = inputs
-        grads = self.loglike_grad(theta)
-        return [grad_outputs[0] * grads]
-
-
-class LoglikeGrad(pt.Op):
+def lnprior(params, q_init, period_init, sigma_lnf_range, t0_range, ecc_bool):
     """
-    Theano Op class for computing the gradient of the log-likelihood function.
-
-    Attributes:
-        data_dict (dict): A dictionary containing the observed data.
+    Defines the log-prior function for the parameters.
+    
+    Args:
+        params (list): A list of model parameters
+    
+    Returns:
+        float: The log-prior value. Returns -∞ for parameters outside valid bounds.
     """
+    # Unpack parameters
+    (teffratio, incl, requivsumfrac, requiv_secondary, q, t0_supconj, asini,
+     teff_secondary, period, sigma_lnf) = params[:10]
+    if ecc_bool:
+        (ecc, per0) = params[10:12]
+        pblums = params[12:]
+        if not (0 < ecc < 1):
+            return -np.inf
+        if not (0 < per0 < 360):
+            return -np.inf
+    else:
+        pblums = params[10:]
 
-    itypes = [pt.dvector]  # Input types (list of parameters as a vector)
-    otypes = [pt.dvector]  # Output types (gradients as a vector)
+    # # Check priors
+    # if not (0 < teffratio <= 1.2):
+    #     return -np.inf
+    # if not (0 < incl < 90):
+    #     return -np.inf
+    # if not (0 < q <= 1):
+    #     return -np.inf
+    # if not (1e-6 < period):
+    #     return -np.inf
+    # if not (sigma_lnf_range[0] < sigma_lnf < sigma_lnf_range[1]):
+    #     return -np.inf
+    # if not (teff_secondary < 300):
+    #     return -np.inf
+    # if not (t0_range[0] < t0_supconj < t0_range[1]):
+    #     return -np.inf
+    # if not (np.all(pblums) > 0):
+    #     return -np.inf
 
-    def __init__(self, data_dict):
-        """
-        Initializes the LoglikeGrad Op with a data dictionary.
+    # More priors as needed for other parameters
+    # Uniform priors return 0 (log(1)); if Gaussian, use -0.5 * ((param - mu)/sigma)**2
+    log_prior_q = -0.5 * ((q - q_init) / (q_init * 0.1))**2  # Gaussian prior with mean q_init and std dev 0.1 * q_init
+    log_prior_period = -0.5 * ((period - period_init) / (0.1 * period_init))**2
 
-        Args:
-            data_dict (dict): A dictionary containing the observed data.
-        """
-        self.data_dict = data_dict
-
-    def perform(self, node, inputs, outputs):
-        """
-        Computes the gradient of the log-likelihood function with respect to the input parameters.
-
-        Args:
-            node: Theano node containing information about the function call.
-            inputs: List of input parameters for which the gradients are computed.
-            outputs: List of output objects to store the computed gradients.
-        """
-        (theta,) = inputs
-
-        # Compute the gradients using the custom derivative function
-        grads = der_log_likelihood([theta], self.data_dict)
-
-        # Store the result in outputs
-        outputs[0][0] = grads
-
+    return log_prior_q + log_prior_period
 
 def lnlikelihood(params, data_dict):
     """
@@ -148,7 +114,7 @@ def lnlikelihood(params, data_dict):
                 dataset=dataset
             )
             # Set the limb darkening mode to 'lookup'
-            print(dataset)
+            # print(dataset)
             if "tess".lower() in dataset.lower():
                 b.set_value(f"passband@{dataset}", value = "TESS:T")
         elif dataset.startswith("rv"):
@@ -186,8 +152,8 @@ def lnlikelihood(params, data_dict):
     b.set_value("teff@secondary@component", teff_secondary)
     b.set_value("period@binary@component", period)
 
-    print(b['teff@primary@component'], b['teff@secondary@component'])
-    print(b['logg@primary@component'], b['logg@secondary@component'])
+    # print(b['teff@primary@component'], b['teff@secondary@component'])
+    # print(b['logg@primary@component'], b['logg@secondary@component'])
     if teff_secondary > 8000:
         b.set_value("gravb_bol@secondary", value=0.9)
         b.set_value("irrad_frac_refl_bol@secondary", value=1.0)
@@ -217,9 +183,9 @@ def lnlikelihood(params, data_dict):
     # Run PHOEBE computation
     b.add_compute("ellc", compute="fastcompute")
     try:
-        print("Computing...")
+        # print("Computing...")
         b.run_compute(compute="fastcompute")
-        print("Passed")
+        print("Successful computation")
     except ValueError as e:
         print("Catching exception.")
         print(e)
@@ -290,31 +256,6 @@ def lnlikelihood(params, data_dict):
         ) / len(obs_fluxes)
 
     # Return the total log-likelihood
-    print(f"Chi2: LC - {chi2_lc}, RV - {chi2_rv}, SED - {chi2_sed}")
+    # print(f"Chi2: LC - {chi2_lc}, RV - {chi2_rv}, SED - {chi2_sed}")
     chi2 = chi2_lc + chi2_rv + chi2_sed
     return -0.5 * chi2
-
-
-def der_log_likelihood(theta, data_dict):
-    """
-    Computes the gradient of the log-likelihood function using finite differences.
-
-    Args:
-        theta (list): A list of model parameters for which the gradient is needed.
-        data_dict (dict): A dictionary containing the observed data.
-
-    Returns:
-        numpy.ndarray: The gradient of the log-likelihood with respect to the parameters.
-    """
-
-    def lnlike(params):
-        return lnlikelihood(params, data_dict)
-
-    # Finite difference step size
-    eps = np.sqrt(np.finfo(float).eps)
-
-    # Compute the gradient using finite differences
-    grads = scipy.optimize.approx_fprime(
-        theta[0], lnlike, [eps * max(1, np.abs(param)) for param in theta[0]]
-    )
-    return grads
