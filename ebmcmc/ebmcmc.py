@@ -120,27 +120,69 @@ class EBMCMC:
         else:
             requiv_secondary_init = self.bundle.get_value("requiv@secondary@component")
 
+        print("Initial Parameter Values:")
+        print(f"  Period (period_init): {period_init}")
+        print(f"  Mass of Primary (m1): {m1}")
+        print(f"  Mass of Secondary (m2): {m2}")
+        print(f"  Mass Ratio (q_init): {q_init}")
+        print(f"  Inclination (incl_init): {incl_init}")
+        print(f"  Semi-major Axis x Sine Inclination (asini_init): {asini_init}")
+        print(f"  Radius Sum Fraction (requivsumfrac_init): {requivsumfrac_init}")
+        print(f"  Temperature Ratio (teffratio_init): {teffratio_init}")
+        print(f"  Secondary Temperature (teff_secondary_init): {teff_secondary_init}")
+        print(f"  Eccentricity (ecc_init): {ecc_init}")
+        print(f"  Periastron (per0_init): {per0_init}")
+        print(f"  Primary Luminosity Ratios (pblums_init): {pblums_init}")
+
+
         with pm.Model() as self.model:
             # Define priors
             period = pm.TruncatedNormal(
                 "period@binary@component",
-                lower=0,
+                lower=1e-6,
                 mu=period_init,
                 sigma=period_init * 0.1,
+                initval=period_init
             )
+            # period = pm.Normal(
+            #     "period@binary@component",
+            #     mu=period_init,
+            #     sigma=period_init * 0.1,
+            #     initval=period_init
+            # )
+
+            # Set the time of superior conjunction prior as a Gaussian with bounds constrained by the min and max times in the dataset
+            t0_supconj_init = self.bundle.get_value('t0_supconj@binary@component')
+            t0_lower = self.min_time
+            t0_upper = self.max_time
+            t0_supconj = pm.Uniform('t0_supconj@binary@component', lower=t0_lower, upper=t0_upper, initval=t0_supconj_init)
+            
             q = pm.TruncatedNormal(
-                "q@binary@component", lower=0.1, upper=1, mu=q_init, sigma=q_init * 0.1
+                "q@binary@component", lower=0.1, upper=1, mu=q_init, sigma=q_init * 0.1, initval=q_init
             )
+            # q = pm.Uniform(
+            #     "q@binary@component", lower=0.1, upper=1, initval=q_init
+            # )
+            incl_lower = 1
             incl = pm.Uniform(
-                "incl@binary@component", lower=1, upper=90, initval=incl_init
+                "incl@binary@component", lower=incl_lower, upper=90, initval=incl_init
             )
+
+            min_stellar_radius = 0.3
+            asini_lower = min_stellar_radius*2*np.sin(incl_lower*(2*np.pi)/360)
             asini = pm.TruncatedNormal(
                 "asini@binary@component",
-                lower=0.01,
-                upper=1000,
+                lower=asini_lower,
                 mu=asini_init,
                 sigma=asini_init * 0.1,
+                initval=asini_init
             )
+            # asini = pm.Normal(
+            #     "asini@binary@component",
+            #     mu=asini_init,
+            #     sigma=asini_init * 0.1,
+            #     initval=asini_init
+            # )
             sma = asini / np.sin(incl * (2 * np.pi) / 360)
 
             mass_primary = (
@@ -153,29 +195,52 @@ class EBMCMC:
                 * (asini / np.sin(incl * (2 * np.pi) / 360)) ** 3
                 / (period**2 * (1 / q + 1))
             )
-
+            
+            requiv_lower = np.sqrt(2942.206217504419328179210424423218 * 9.319541 * mass_secondary/(10**5.5))
+            requiv_upper = np.sqrt(2942.206217504419328179210424423218 * 9.319541 * mass_secondary/(10**3.5))
             requiv_secondary = pm.Uniform(
                 "requiv@secondary@component",
-                lower=0.1,
-                upper=3,
-                initval=requiv_secondary_init,
+                lower=0.15,
+                upper=requiv_upper,
+                initval=requiv_secondary_init
             )
-            requivsumfrac = pm.Uniform(
-                "requivsumfrac@binary@component",
-                lower=0.01,
-                upper=0.5,
-                initval=requivsumfrac_init,
-            )
+            print(f'Init requiv: {requiv_secondary_init}')
+
+            # Set the lower bound for requivsumfrac such that the primary radius also results in logg<5
+            r1r2_a_lower = ((2942.206217504419328179210424423218 * 9.319541 * mass_primary / 10**5)**(1/2) + requiv_secondary)/sma
+            # Set the upper bound for requivsumfrac such that the primary radius also results in logg>3.5
+            r1r2_a_upper = ((2942.206217504419328179210424423218 * 9.319541 * mass_primary / 10**3.5)**(1/2) + requiv_secondary)/sma
+
+            # Set the requivsumfrac prior for eclipsing systems
+            if self.eclipsing:
+                # Set the lower bound based on the condition to see an eclipse
+                r1r2_a_lower_eclipse = np.sin((90-incl)*(2*np.pi)/360)
+                # If the lower bound from the eclipse condition is greater than the lower bound from logg<5, use the eclipse condition
+                maximum_r1r2_a_lower = pm.Deterministic('minimum_value', pt.maximum(r1r2_a_lower_eclipse, r1r2_a_lower))
+
+                # print('Debug: r1r2_a_lower from eclipse condition:', maximum_r1r2_a_lower)
+                # print('Debug: r1r2_a_upper:', r1r2_a_upper)
+                # Set requivsumfrac prior as a Gaussian with bounds
+                requivsumfrac = pm.Uniform('requivsumfrac@binary@component', lower=maximum_r1r2_a_lower, upper=r1r2_a_upper, initval=requivsumfrac_init)
+
+            # Set the requivsumfrac prior for non-eclipsing systems
+            else:
+                # Set requivsumfrac prior as a Gaussian with bounds
+                # requivsumfrac = pm.Uniform('requivsumfrac@binary@component', lower=r1r2_a_lower, upper=r1r2_a_upper, initval=requivsumfrac_init)
+                requivsumfrac = pm.TruncatedNormal('requivsumfrac@binary@component', lower=1e-10, mu=requivsumfrac_init, sigma=0.3*requivsumfrac_init, initval=requivsumfrac_init)
+                # requivsumfrac = pm.Uniform('requivsumfrac@binary@component', lower=1e-10, upper=1, initval=requivsumfrac_init)
 
             teff_secondary = pm.Uniform(
                 "teff@secondary@component",
-                lower=3500,
+                lower=2800,
                 upper=50000,
                 initval=teff_secondary_init,
             )
+
+            # Set the temperature ratio prior as a Gaussian with bounds. Lower bound is based on the maximum possible primary temperature
             teffratio = pm.Uniform(
                 "teffratio@binary@component",
-                lower=0.7,
+                lower=teff_secondary/50000,
                 upper=1.2,
                 initval=teffratio_init,
             )
@@ -183,14 +248,11 @@ class EBMCMC:
             if self.ecc:
                 ecc = pm.Beta("ecc@binary@component", alpha=1, beta=5, initval=ecc_init)
                 per0_rad = pm.VonMises(
-                    "per0@rad", mu=per0_init * (2 * np.pi) / 360, kappa=1
+                    "per0@rad", mu=per0_init * (2 * np.pi) / 360, kappa=1,
                 )
                 per0 = pm.Deterministic(
                     "per0@binary@component", 360 / (2 * np.pi) * per0_rad
                 )
-            else:
-                ecc = 0
-                per0 = 0
 
             sigma_lnf = pm.Uniform("sigma_lnf", lower=-15, upper=-1)
 
@@ -200,21 +262,28 @@ class EBMCMC:
                 requivsumfrac,
                 requiv_secondary,
                 q,
-                period,
-                sigma_lnf,
+                t0_supconj, 
+                asini,
                 teff_secondary,
+                period,
+                sigma_lnf
             ]
 
             if self.ecc:
                 fit_params.extend([ecc, per0])
 
             for i, pblum in enumerate(pblums_init):
+                # fit_params.append(
+                #     pm.TruncatedNormal(
+                #         f"pblum@primary@{i}@dataset", lower=1e-10, mu=pblum, sigma=0.01
+                #     )
+                # )
                 fit_params.append(
-                    pm.TruncatedNormal(
-                        f"pblum@primary@{i}@dataset", lower=0, mu=pblum, sigma=0.01
+                    pm.Normal(
+                        f"pblum@primary@{i}@dataset", mu=pblum, sigma=0.01, initval=pblum
                     )
                 )
-
+            
             loglike = Loglike(self.data_dict)
             params = pt.as_tensor_variable(fit_params)
 

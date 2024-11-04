@@ -1,6 +1,8 @@
 import numpy as np
 import pytensor.tensor as pt
+import binarysed
 import phoebe
+import scipy
 
 
 class Loglike(pt.Op):
@@ -143,7 +145,12 @@ def lnlikelihood(params, data_dict):
                 times=data_dict[dataset]["times"],
                 fluxes=data_dict[dataset]["data"],
                 sigmas=data_dict[dataset]["sigmas"],
+                dataset=dataset
             )
+            # Set the limb darkening mode to 'lookup'
+            print(dataset)
+            if "tess".lower() in dataset.lower():
+                b.set_value(f"passband@{dataset}", value = "TESS:T")
         elif dataset.startswith("rv"):
             b.add_dataset(
                 "rv",
@@ -161,6 +168,7 @@ def lnlikelihood(params, data_dict):
                 },
             )
 
+    b.set_value_all('ld_mode', 'lookup')
     # Set the PHOEBE parameters
     b.flip_constraint("teffratio@binary@constraint", solve_for="teff@primary@component")
     b.flip_constraint(
@@ -178,6 +186,24 @@ def lnlikelihood(params, data_dict):
     b.set_value("teff@secondary@component", teff_secondary)
     b.set_value("period@binary@component", period)
 
+    print(b['teff@primary@component'], b['teff@secondary@component'])
+    print(b['logg@primary@component'], b['logg@secondary@component'])
+    if teff_secondary > 8000:
+        b.set_value("gravb_bol@secondary", value=0.9)
+        b.set_value("irrad_frac_refl_bol@secondary", value=1.0)
+    teff_primary = b.get_value("teff@primary@component")
+    if teff_primary > 8000:
+        b.set_value("gravb_bol@primary", value=0.9)
+        b.set_value("irrad_frac_refl_bol@primary", value=1.0)
+
+    logg_primary = b.get_value("logg@primary@component")
+    logg_secondary = b.get_value("logg@secondary@component")
+
+    if teff_primary < 3000 or logg_primary > 5:
+        b.set_value('ld_coeffs_source@primary', value='phoenix')
+    if teff_secondary < 3000 or logg_secondary > 5:
+        b.set_value('ld_coeffs_source@secondary', value='phoenix')
+
     # Set eccentricity and periastron, if needed
     if len(params) > 12:
         b.set_value("ecc@binary@component", ecc)
@@ -191,8 +217,12 @@ def lnlikelihood(params, data_dict):
     # Run PHOEBE computation
     b.add_compute("ellc", compute="fastcompute")
     try:
+        print("Computing...")
         b.run_compute(compute="fastcompute")
-    except ValueError:
+        print("Passed")
+    except ValueError as e:
+        print("Catching exception.")
+        print(e)
         return -np.inf
 
     # Get model predictions for light curves (LCs) and radial velocities (RVs)
@@ -214,7 +244,7 @@ def lnlikelihood(params, data_dict):
         data_lc = data_dict[dataset]["data"]
         sigma_lc = data_dict[dataset]["sigmas"]
         sigma_lc_sq = sigma_lc**2 + y_pred**2 * np.exp(2 * sigma_lnf)
-        chi2_lc += np.sum(np.log(sigma_lc_sq) + (data_lc - y_pred) ** 2 / sigma_lc_sq)
+        chi2_lc += np.sum(np.log(sigma_lc_sq) + (data_lc - y_pred) ** 2 / sigma_lc_sq) / len(data_lc)
 
     # Calculate chi-squared for RVs, if present
     chi2_rv = 0
@@ -225,15 +255,15 @@ def lnlikelihood(params, data_dict):
         data_rv2 = data_dict[dataset]["secondary"]
         chi2_rv += np.sum(
             np.log(sigma_rv1**2) + (data_rv1 - y_pred_rv_primary) ** 2 / sigma_rv1**2
-        )
+        ) / len(data_rv1)
         chi2_rv += np.sum(
             np.log(sigma_rv2**2) + (data_rv2 - y_pred_rv_secondary) ** 2 / sigma_rv2**2
-        )
+        ) / len(data_rv2)
 
     # Calculate chi-squared for SED, if provided
     chi2_sed = 0
     if "sed" in data_dict:
-        sed_obj = sed.SED(data_dict["sed"])
+        sed_obj = binarysed.SED(data_dict["sed"])
         wavelengths = data_dict["sed"]["wavelengths"]
         obs_fluxes = data_dict["sed"]["fluxes"]
         obs_flux_errs = data_dict["sed"]["flux_errs"]
@@ -252,13 +282,15 @@ def lnlikelihood(params, data_dict):
             requiv_secondary,
             logg1,
             logg2,
+            select_wavelengths=True
         )
 
         chi2_sed = np.sum(
             np.log(obs_flux_errs**2) + (obs_fluxes - sed_model) ** 2 / obs_flux_errs**2
-        )
+        ) / len(obs_fluxes)
 
     # Return the total log-likelihood
+    print(f"Chi2: LC - {chi2_lc}, RV - {chi2_rv}, SED - {chi2_sed}")
     chi2 = chi2_lc + chi2_rv + chi2_sed
     return -0.5 * chi2
 
