@@ -32,6 +32,7 @@ class EBMCMC:
 
         self.initialize_bundle()
         self.initialize_logging()
+        self.set_run_dir()
 
     def initialize_bundle(self):
         """Initializes PHOEBE bundle values."""
@@ -145,6 +146,10 @@ class EBMCMC:
         sigma_lnf_range = [-15, -1]
         t0_range = [self.min_time, self.max_time]
 
+        filename = '{}/mcmc.h5'.format(self.run_dir)
+        backend = emcee.backends.HDFBackend(filename)
+        backend.reset(nwalkers, len(initial_guess))
+
         # Create the emcee sampler
         with Pool(processes=threads) as pool:
             sampler = emcee.EnsembleSampler(nwalkers, len(initial_guess), lnprob, args=[self.data_dict, q_init, period_init, sigma_lnf_range, t0_range, ecc], pool=pool)
@@ -156,17 +161,20 @@ class EBMCMC:
         self.save_trace(sampler)
 
         return sampler
-
-    def save_trace(self, sampler):
+    
+    def set_run_dir(self):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         run_dir = os.path.join(self.trace_dir, f"run_{timestamp}")
         os.makedirs(run_dir, exist_ok=True)
+        self.run_dir = run_dir
+
+    def save_trace(self, sampler):
 
         # Save sampler chain and other attributes
-        np.save(os.path.join(run_dir, "chain.npy"), sampler.get_chain())
-        np.save(os.path.join(run_dir, "log_prob.npy"), sampler.get_log_prob())
-        np.save(os.path.join(run_dir, "sampler_state.npy"), sampler.get_last_sample())
-        print(f"Trace saved to {run_dir}")
+        np.save(os.path.join(self.run_dir, "chain.npy"), sampler.get_chain())
+        np.save(os.path.join(self.run_dir, "log_prob.npy"), sampler.get_log_prob())
+        np.save(os.path.join(self.run_dir, "sampler_state.npy"), sampler.get_last_sample())
+        print(f"Trace saved to {self.run_dir}")
 
     def check_convergence(self, sampler):
         """Checks convergence by estimating the integrated autocorrelation time."""
