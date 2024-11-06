@@ -152,13 +152,46 @@ class EBMCMC:
 
         # Create the emcee sampler
         with Pool(processes=threads) as pool:
-            sampler = emcee.EnsembleSampler(nwalkers, len(initial_guess), lnprob, args=[self.data_dict, q_init, period_init, sigma_lnf_range, t0_range, ecc], pool=pool)
+            sampler = emcee.EnsembleSampler(nwalkers, 
+                                            len(initial_guess), 
+                                            lnprob, 
+                                            args=[self.data_dict, q_init, period_init, sigma_lnf_range, t0_range, ecc], 
+                                            pool=pool,
+                                            backend=backend)
 
-            print("Running sampling...")
-            sampler.run_mcmc(p0, nsteps, progress=True)
+            print("Running sampling with convergence checks...")
+
+            max_n = 100000  # Maximum number of steps
+            index = 0       # To track the number of autocorrelation checks
+            autocorr = np.empty(max_n // 100)  # Store average autocorrelation times
+            old_tau = np.inf  # Previous autocorrelation time for comparison
+
+            # Run sampling up to `max_n` steps with periodic convergence checks
+            for sample in sampler.sample(p0, iterations=max_n, progress=True):
+                # Check convergence every 100 steps
+                if sampler.iteration % 100 == 0:
+                    # Compute the autocorrelation time
+                    try:
+                        tau = sampler.get_autocorr_time(tol=0)
+                    except emcee.autocorr.AutocorrError:
+                        print("Autocorrelation time could not be estimated reliably.")
+                        continue
+
+                    autocorr[index] = np.mean(tau)  # Track average autocorrelation time
+                    index += 1
+
+                    # Check convergence criteria
+                    converged = np.all(tau * 100 < sampler.iteration)
+                    converged &= np.all(np.abs(old_tau - tau) / tau < 0.01)
+                    if converged:
+                        print("Convergence reached.")
+                        break
+                    old_tau = tau  # Update old_tau for next comparison
+
+            print("Sampling completed.")
 
         # Save the trace
-        self.save_trace(sampler)
+        # self.save_trace(sampler)
 
         return sampler
     
