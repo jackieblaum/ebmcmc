@@ -152,7 +152,8 @@ def lnlikelihood(params, data_dict):
         b.set_value("asini@binary@component", asini)
         b.set_value("teff@secondary@component", teff_secondary)
         b.set_value("period@binary@component", period)
-    except:
+    except Exception as e:
+        print(e)
         return -np.inf
 
     # print(b['teff@primary@component'], b['teff@secondary@component'])
