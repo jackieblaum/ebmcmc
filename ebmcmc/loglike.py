@@ -44,23 +44,23 @@ def lnprior(params, q_init, period_init, sigma_lnf_range, t0_range, ecc_bool):
     else:
         pblums = params[10:]
 
-    # # Check priors
-    # if not (0 < teffratio <= 1.2):
-    #     return -np.inf
-    # if not (0 < incl < 90):
-    #     return -np.inf
-    # if not (0 < q <= 1):
-    #     return -np.inf
-    # if not (1e-6 < period):
-    #     return -np.inf
-    # if not (sigma_lnf_range[0] < sigma_lnf < sigma_lnf_range[1]):
-    #     return -np.inf
-    # if not (teff_secondary < 300):
-    #     return -np.inf
-    # if not (t0_range[0] < t0_supconj < t0_range[1]):
-    #     return -np.inf
-    # if not (np.all(pblums) > 0):
-    #     return -np.inf
+    # Check priors
+    if not (0 < teffratio <= 1.2):
+        return -np.inf
+    if not (0 < incl < 90):
+        return -np.inf
+    if not (0 < q <= 1):
+        return -np.inf
+    if not (1e-6 < period):
+        return -np.inf
+    if not (sigma_lnf_range[0] < sigma_lnf < sigma_lnf_range[1]):
+        return -np.inf
+    if not (teff_secondary < 300):
+        return -np.inf
+    if not (t0_range[0] < t0_supconj < t0_range[1]):
+        return -np.inf
+    if not (np.all(pblums) > 0):
+        return -np.inf
 
     # More priors as needed for other parameters
     # Uniform priors return 0 (log(1)); if Gaussian, use -0.5 * ((param - mu)/sigma)**2
