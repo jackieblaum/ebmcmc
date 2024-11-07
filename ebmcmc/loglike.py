@@ -69,17 +69,8 @@ def lnprior(params, q_init, period_init, sigma_lnf_range, t0_range, ecc_bool):
 
     return log_prior_q + log_prior_period
 
-def lnlikelihood(params, data_dict):
-    """
-    Computes the log-likelihood for the given model parameters and observed data.
+def forward_model(params, data_dict):
 
-    Args:
-        params (list): A list of model parameters (e.g., period, inclination, temperatures).
-        data_dict (dict): A dictionary containing the observed data (light curves, RVs, SED).
-
-    Returns:
-        float: The computed log-likelihood value.
-    """
     # Unpack the input parameters
     (
         teffratio,
@@ -91,7 +82,7 @@ def lnlikelihood(params, data_dict):
         asini,
         teff_secondary,
         period,
-        sigma_lnf,
+        _,
     ) = params[:10]
     pblums = params[10:]
 
@@ -142,22 +133,16 @@ def lnlikelihood(params, data_dict):
     )
     b.flip_constraint("asini@binary@constraint", solve_for="sma@binary@component")
 
-    try:
-        b.set_value("teffratio@binary@component", teffratio)
-        b.set_value("incl@binary@component", incl)
-        b.set_value("requivsumfrac@binary@component", requivsumfrac)
-        b.set_value("requiv@secondary@component", requiv_secondary)
-        b.set_value("q@binary@component", q)
-        b.set_value("t0_supconj@binary@component", t0_supconj)
-        b.set_value("asini@binary@component", asini)
-        b.set_value("teff@secondary@component", teff_secondary)
-        b.set_value("period@binary@component", period)
-    except Exception as e:
-        print(e)
-        return -np.inf
+    b.set_value("teffratio@binary@component", teffratio)
+    b.set_value("incl@binary@component", incl)
+    b.set_value("requivsumfrac@binary@component", requivsumfrac)
+    b.set_value("requiv@secondary@component", requiv_secondary)
+    b.set_value("q@binary@component", q)
+    b.set_value("t0_supconj@binary@component", t0_supconj)
+    b.set_value("asini@binary@component", asini)
+    b.set_value("teff@secondary@component", teff_secondary)
+    b.set_value("period@binary@component", period)
 
-    # print(b['teff@primary@component'], b['teff@secondary@component'])
-    # print(b['logg@primary@component'], b['logg@secondary@component'])
     if teff_secondary > 8000:
         b.set_value("gravb_bol@secondary", value=0.9)
         b.set_value("irrad_frac_refl_bol@secondary", value=1.0)
@@ -186,14 +171,7 @@ def lnlikelihood(params, data_dict):
 
     # Run PHOEBE computation
     b.add_compute("ellc", compute="fastcompute")
-    try:
-        # print("Computing...")
-        b.run_compute(compute="fastcompute")
-        print("Successful computation")
-    except ValueError as e:
-        print("Catching exception.")
-        print(e)
-        return -np.inf
+    b.run_compute(compute="fastcompute")
 
     # Get model predictions for light curves (LCs) and radial velocities (RVs)
     y_pred_lc = [
@@ -207,6 +185,54 @@ def lnlikelihood(params, data_dict):
     y_pred_rv_secondary = (
         b.get_value(f"rvs@model@{dataset}@secondary") if "rv" in b.datasets else None
     )
+
+    if "sed" in data_dict:
+        sed_obj = binarysed.SED(data_dict["sed"])
+        wavelengths = data_dict["sed"]["wavelengths"]
+        teff_primary = b.get_value("teff@primary@component")
+        teff_secondary = b.get_value("teff@secondary@component")
+        requiv_primary = b.get_value("requiv@primary@component")
+        requiv_secondary = b.get_value("requiv@secondary@component")
+        logg1 = b.get_value("logg@primary@component")
+        logg2 = b.get_value("logg@secondary@component")
+
+        sed_model = sed_obj.create_apparent_sed(
+            wavelengths,
+            teff_primary,
+            teff_secondary,
+            requiv_primary,
+            requiv_secondary,
+            logg1,
+            logg2,
+            select_wavelengths=True
+        )
+    else:
+        sed_model = None
+
+    return y_pred_lc, y_pred_rv_primary, y_pred_rv_secondary, sed_model
+
+
+def lnlikelihood(params, data_dict):
+    """
+    Computes the log-likelihood for the given model parameters and observed data.
+
+    Args:
+        params (list): A list of model parameters (e.g., period, inclination, temperatures).
+        data_dict (dict): A dictionary containing the observed data (light curves, RVs, SED).
+
+    Returns:
+        float: The computed log-likelihood value.
+    """
+
+    try:
+        y_pred_lc, y_pred_rv_primary, y_pred_rv_secondary, sed_model = forward_model(params, data_dict)   
+        print('Successful computation.')
+    except ValueError as e:
+        print("Catching exception.")
+        print(e)
+        return -np.inf
+    
+    sigma_lnf = params[9]
 
     # Calculate chi-squared for light curves
     chi2_lc = 0
@@ -232,28 +258,9 @@ def lnlikelihood(params, data_dict):
 
     # Calculate chi-squared for SED, if provided
     chi2_sed = 0
-    if "sed" in data_dict:
-        sed_obj = binarysed.SED(data_dict["sed"])
-        wavelengths = data_dict["sed"]["wavelengths"]
+    if sed_model is not None:
         obs_fluxes = data_dict["sed"]["fluxes"]
         obs_flux_errs = data_dict["sed"]["flux_errs"]
-        teff_primary = b.get_value("teff@primary@component")
-        teff_secondary = b.get_value("teff@secondary@component")
-        requiv_primary = b.get_value("requiv@primary@component")
-        requiv_secondary = b.get_value("requiv@secondary@component")
-        logg1 = b.get_value("logg@primary@component")
-        logg2 = b.get_value("logg@secondary@component")
-
-        sed_model = sed_obj.create_apparent_sed(
-            wavelengths,
-            teff_primary,
-            teff_secondary,
-            requiv_primary,
-            requiv_secondary,
-            logg1,
-            logg2,
-            select_wavelengths=True
-        )
 
         chi2_sed = np.sum(
             np.log(obs_flux_errs**2) + (obs_fluxes - sed_model) ** 2 / obs_flux_errs**2
