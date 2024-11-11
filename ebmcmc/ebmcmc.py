@@ -11,7 +11,7 @@ import binarysed
 from ebmcmc.loglike import lnprob
 from multiprocessing import Pool
 
-
+phoebe.mpi_off()
 
 class EBMCMC:
     """
