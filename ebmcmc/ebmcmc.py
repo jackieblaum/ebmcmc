@@ -113,6 +113,9 @@ class EBMCMC:
         else:
             requiv_secondary_init = self.bundle.get_value("requiv@secondary@component")
 
+        if 90 < incl_init < 180:
+            incl_init = 180 - incl_init
+
         if ecc:
             ecc_init = self.bundle.get_value("ecc@binary@component")
             per0_init = self.bundle.get_value("per0@binary@component")
