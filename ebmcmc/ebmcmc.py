@@ -128,6 +128,22 @@ class EBMCMC:
                 sigma_lnf_init]
         for pblum in pblums_init:
             init_vals.append(pblum)
+        print("Initial Values:")
+        print("teffratio:", init_vals[0])
+        print("incl:", init_vals[1])
+        print("requivsumfrac:", init_vals[2])
+        print("requiv_secondary:", init_vals[3])
+        print("q:", init_vals[4])
+        print("t0_supconj:", init_vals[5])
+        print("asini:", init_vals[6])
+        print("teff_secondary:", init_vals[7])
+        print("period:", init_vals[8])
+        print("sigma_lnf:", init_vals[9])
+        if ecc:
+            print("ecc:", init_vals[10])
+            print("per0:", init_vals[11])
+        for i, pblum in enumerate(pblums_init):
+            print(f"pblum_{i+1}:", pblum)
         return init_vals
 
 
