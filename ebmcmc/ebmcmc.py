@@ -162,14 +162,20 @@ class EBMCMC:
             print("Running sampling with convergence checks...")
 
             max_n = 100000  # Maximum number of steps
+            thin = 10       # Keep every 10th sample to reduce autocorrelation (adjust as needed)
+            burn_in = 2000  # Number of samples to discard as burn-in
             index = 0       # To track the number of autocorrelation checks
-            autocorr = np.empty(max_n // 100)  # Store average autocorrelation times
+            autocorr = np.empty(max_n // (100 * thin))  # Adjusted for thinning
             old_tau = np.inf  # Previous autocorrelation time for comparison
 
             # Run sampling up to `max_n` steps with periodic convergence checks
-            for sample in sampler.sample(p0, iterations=max_n, progress=True):
-                # Check convergence every 100 steps
-                if sampler.iteration % 100 == 0:
+            for sample in sampler.sample(p0, iterations=max_n, progress=True, thin=thin):
+                # Skip initial burn-in period
+                if sampler.iteration < burn_in:
+                    continue
+                
+                # Check convergence every 100 * thin steps
+                if sampler.iteration % (100 * thin) == 0:
                     # Compute the autocorrelation time
                     try:
                         tau = sampler.get_autocorr_time(tol=0)
@@ -181,7 +187,7 @@ class EBMCMC:
                     index += 1
 
                     # Check convergence criteria
-                    converged = np.all(tau * 100 < sampler.iteration)
+                    converged = np.all(tau * 50 < sampler.iteration)
                     converged &= np.all(np.abs(old_tau - tau) / tau < 0.01)
                     if converged:
                         print("Convergence reached.")
