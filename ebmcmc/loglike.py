@@ -62,7 +62,7 @@ def lnprior(params, q_init, period_init, sigma_lnf_range, t0_range, ecc_bool):
     if not (sigma_lnf_range[0] < sigma_lnf < sigma_lnf_range[1]):
         print(f"sigma_lnf value: {sigma_lnf}")
         return -np.inf
-    if not (teff_secondary < 300):
+    if not (teff_secondary > 300):
         print(f"teff_secondary value: {teff_secondary}")
         return -np.inf
     if not (t0_range[0] < t0_supconj < t0_range[1]):
