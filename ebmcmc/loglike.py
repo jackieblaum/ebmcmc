@@ -48,20 +48,28 @@ def lnprior(params, q_init, period_init, sigma_lnf_range, t0_range, ecc_bool):
 
     # Check priors
     if not (0 < teffratio <= 1.2):
+        print(f"teffratio value: {teffratio}")
         return -np.inf
     if not (0 < incl < 90):
+        print(f"incl value: {incl}")
         return -np.inf
     if not (0 < q <= 1):
+        print(f"q value: {q}")
         return -np.inf
     if not (1e-6 < period):
+        print(f"period value: {period}")
         return -np.inf
     if not (sigma_lnf_range[0] < sigma_lnf < sigma_lnf_range[1]):
+        print(f"sigma_lnf value: {sigma_lnf}")
         return -np.inf
     if not (teff_secondary < 300):
+        print(f"teff_secondary value: {teff_secondary}")
         return -np.inf
     if not (t0_range[0] < t0_supconj < t0_range[1]):
+        print(f"t0_supconj value: {t0_supconj}")
         return -np.inf
     if not (np.all(pblums) > 0):
+        print(f"pblums value: {pblums}")
         return -np.inf
 
     # More priors as needed for other parameters
