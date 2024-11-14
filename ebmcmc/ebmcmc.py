@@ -11,8 +11,6 @@ import binarysed
 from ebmcmc.loglike import lnprob
 from multiprocessing import Pool
 
-phoebe.mpi_off()
-
 class EBMCMC:
     """
     A class for performing Markov Chain Monte Carlo (MCMC) sampling on binary star systems using PHOEBE and pymc.
@@ -158,8 +156,12 @@ class EBMCMC:
         if initial_guess is None:
             raise ValueError("Initial values for parameters cannot be found.")
         
-        # Ensure the initial guess is of the right shape for emcee
-        p0 = [initial_guess + 1e-4 * np.random.randn(len(initial_guess)) for _ in range(nwalkers)]
+        scales = [0.02, 0.2, 0.01, 0.02, 
+                0.01, 0.0002, 0.2, 20, 0.1, 1]
+        for _ in range(len(initial_guess) - len(scales)):
+            scales.append(0.05)
+        scales = np.array(scales)
+        p0 = [initial_guess + scales * np.random.randn(len(initial_guess)) for _ in range(nwalkers)]
         q_init = initial_guess[4]
         period_init = initial_guess[8]
         sigma_lnf_range = [-15, -1]
