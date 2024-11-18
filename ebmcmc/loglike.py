@@ -53,22 +53,31 @@ def lnprior(params, q_init, period_init, sigma_lnf_range, t0_range, ecc_bool):
     if not (0 < incl < 90):
         print(f"incl value: {incl}")
         return -np.inf
+    if not (0 < requivsumfrac < 1):
+        print(f"requivsumfrac value: {incl}")
+        return -np.inf
+    if not (1e-6 < requiv_secondary < 1e6):
+        print(f"requiv_secondary value: {incl}")
+        return -np.inf
     if not (0 < q <= 1):
         print(f"q value: {q}")
         return -np.inf
-    if not (1e-6 < period):
+    if not (1e-6 < period < 1e6):
         print(f"period value: {period}")
         return -np.inf
     if not (sigma_lnf_range[0] < sigma_lnf < sigma_lnf_range[1]):
         print(f"sigma_lnf value: {sigma_lnf}")
         return -np.inf
-    if not (teff_secondary > 300):
+    if not (300 < teff_secondary < 1e6):
         print(f"teff_secondary value: {teff_secondary}")
         return -np.inf
     if not (t0_range[0] < t0_supconj < t0_range[1]):
         print(f"t0_supconj value: {t0_supconj}")
         return -np.inf
-    if not (np.all(pblums) > 0):
+    if not (1e-6 < asini < 1e6):
+        print(f"asini value: {incl}")
+        return -np.inf
+    if not (0 < np.all(pblums) < 1e6):
         print(f"pblums value: {pblums}")
         return -np.inf
 
