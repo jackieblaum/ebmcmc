@@ -179,7 +179,7 @@ class EBMCMC:
         else:
             print(f"Sampler starting with {n_steps_completed} steps completed.")
             ndim = backend.get_chain().shape[2]
-            p0 = None
+            p0 = backend.get_chain()[-1]
 
         # Create the emcee sampler
         with Pool(processes=threads) as pool:
