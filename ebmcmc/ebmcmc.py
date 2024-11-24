@@ -199,6 +199,7 @@ class EBMCMC:
             autocorr = np.empty(max_n // (100 * thin))  # Adjusted for thinning
             old_tau = np.inf  # Previous autocorrelation time for comparison
 
+            print(p0)
             # Run sampling up to `max_n` steps with periodic convergence checks
             for sample in sampler.sample(p0, iterations=max_n, progress=True, thin=thin):
                 # Skip initial burn-in period
