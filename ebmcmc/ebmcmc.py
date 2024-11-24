@@ -17,7 +17,7 @@ class EBMCMC:
     """
 
     def __init__(
-        self, bundle, trace_dir=None, sed=None, datasets=None, eclipsing=True, ecc=True
+        self, bundle, trace_dir=None, sed=None, datasets=None, eclipsing=True, ecc=True, prev_run_dir=None
     ):
         self.bundle = bundle
         self.sed = sed
@@ -30,7 +30,7 @@ class EBMCMC:
 
         self.initialize_bundle()
         self.initialize_logging()
-        self.set_run_dir()
+        self.set_run_dir(prev_run_dir)
 
     def initialize_bundle(self):
         """Initializes PHOEBE bundle values."""
@@ -161,7 +161,6 @@ class EBMCMC:
         for _ in range(len(initial_guess) - len(scales)):
             scales.append(0.05)
         scales = np.array(scales)
-        p0 = [initial_guess + scales * np.random.randn(len(initial_guess)) for _ in range(nwalkers)]
         q_init = initial_guess[4]
         period_init = initial_guess[8]
         sigma_lnf_range = [-15, -1]
@@ -169,7 +168,16 @@ class EBMCMC:
 
         filename = '{}/mcmc.h5'.format(self.run_dir)
         backend = emcee.backends.HDFBackend(filename)
-        backend.reset(nwalkers, len(initial_guess))
+
+        n_steps_completed = backend.iteration
+
+        if n_steps_completed == 0:
+            print("Starting fresh.")
+            backend.reset(nwalkers, len(initial_guess))
+            p0 = [initial_guess + scales * np.random.randn(len(initial_guess)) for _ in range(nwalkers)]
+        else:
+            print(f"Sampler starting with {n_steps_completed} steps completed.")
+            p0 = None
 
         # Create the emcee sampler
         with Pool(processes=threads) as pool:
@@ -222,11 +230,14 @@ class EBMCMC:
 
         return sampler
     
-    def set_run_dir(self):
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        run_dir = os.path.join(self.trace_dir, f"run_{timestamp}")
-        os.makedirs(run_dir, exist_ok=True)
-        self.run_dir = run_dir
+    def set_run_dir(self, prev_run_dir):
+        if prev_run_dir is None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            run_dir = os.path.join(self.trace_dir, f"run_{timestamp}")
+            os.makedirs(run_dir, exist_ok=True)
+            self.run_dir = run_dir
+        else:
+            self.run_dir = prev_run_dir
 
     def save_trace(self, sampler):
 
