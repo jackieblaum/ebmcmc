@@ -174,15 +174,17 @@ class EBMCMC:
         if n_steps_completed == 0:
             print("Starting fresh.")
             backend.reset(nwalkers, len(initial_guess))
-            p0 = [initial_guess + scales * np.random.randn(len(initial_guess)) for _ in range(nwalkers)]
+            ndim = len(initial_guess)
+            p0 = [initial_guess + scales * np.random.randn(ndim) for _ in range(nwalkers)]
         else:
             print(f"Sampler starting with {n_steps_completed} steps completed.")
+            ndim = backend.get_chain().shape[2]
             p0 = None
 
         # Create the emcee sampler
         with Pool(processes=threads) as pool:
             sampler = emcee.EnsembleSampler(nwalkers, 
-                                            len(initial_guess), 
+                                            ndim, 
                                             lnprob, 
                                             args=[self.data_dict, q_init, period_init, sigma_lnf_range, t0_range, ecc], 
                                             pool=pool,
@@ -191,8 +193,8 @@ class EBMCMC:
             print("Running sampling with convergence checks...")
 
             max_n = 100000  # Maximum number of steps
-            thin = 10       # Keep every 10th sample to reduce autocorrelation (adjust as needed)
-            burn_in = 2000  # Number of samples to discard as burn-in
+            thin = 7       # Keep every 10th sample to reduce autocorrelation (adjust as needed)
+            burn_in = 50  # Number of samples to discard as burn-in
             index = 0       # To track the number of autocorrelation checks
             autocorr = np.empty(max_n // (100 * thin))  # Adjusted for thinning
             old_tau = np.inf  # Previous autocorrelation time for comparison
@@ -203,8 +205,8 @@ class EBMCMC:
                 if sampler.iteration < burn_in:
                     continue
                 
-                # Check convergence every 100 * thin steps
-                if sampler.iteration % (100 * thin) == 0:
+                # Check convergence every 50 * thin steps
+                if sampler.iteration % (50 * thin) == 0:
                     # Compute the autocorrelation time
                     try:
                         tau = sampler.get_autocorr_time(tol=0)
