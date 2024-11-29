@@ -169,9 +169,9 @@ class EBMCMC:
         filename = '{}/mcmc.h5'.format(self.run_dir)
         backend = emcee.backends.HDFBackend(filename)
 
-        n_steps_completed = backend.iteration
-
-        if n_steps_completed == 0:
+        try:
+            n_steps_completed = backend.iteration
+        except:
             print("Starting fresh.")
             backend.reset(nwalkers, len(initial_guess))
             ndim = len(initial_guess)
