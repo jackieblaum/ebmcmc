@@ -19,7 +19,7 @@ def lnprob(params, data_dict, q_init, period_init, sigma_lnf_range, t0_range, ec
     lp = lnprior(params, q_init, period_init, sigma_lnf_range, t0_range, ecc_bool)
     if not np.isfinite(lp):
         return -np.inf
-    return lp + lnlikelihood(params, data_dict)
+    return lp + lnlikelihood(params, data_dict, ecc_bool)
 
 def lnprior(params, q_init, period_init, sigma_lnf_range, t0_range, ecc_bool):
     """
@@ -86,7 +86,7 @@ def lnprior(params, q_init, period_init, sigma_lnf_range, t0_range, ecc_bool):
 
     return log_prior_q + log_prior_period
 
-def forward_model(params, data_dict):
+def forward_model(params, data_dict, ecc_bool):
 
     # Unpack the input parameters
     (
@@ -101,12 +101,13 @@ def forward_model(params, data_dict):
         period,
         _,
     ) = params[:10]
-    pblums = params[10:]
 
-    if len(params) > 12:
+    if ecc_bool:
         ecc, per0 = params[10:12]
+        pblums = params[12:]
     else:
         ecc, per0 = 0, 0
+        pblums = params[10:]
 
     # Create a new PHOEBE bundle and set the parameters
     b = phoebe.default_binary()
@@ -177,7 +178,7 @@ def forward_model(params, data_dict):
         b.set_value('ld_coeffs_source@secondary', value='phoenix')
 
     # Set eccentricity and periastron, if needed
-    if len(params) > 12:
+    if ecc_bool:
         b.set_value("ecc@binary@component", ecc)
         b.set_value("per0@binary@component", per0)
 
@@ -229,7 +230,7 @@ def forward_model(params, data_dict):
     return y_pred_lc, y_pred_rv_primary, y_pred_rv_secondary, sed_model
 
 
-def lnlikelihood(params, data_dict):
+def lnlikelihood(params, data_dict, ecc_bool):
     """
     Computes the log-likelihood for the given model parameters and observed data.
 
@@ -242,7 +243,7 @@ def lnlikelihood(params, data_dict):
     """
 
     try:
-        y_pred_lc, y_pred_rv_primary, y_pred_rv_secondary, sed_model = forward_model(params, data_dict)   
+        y_pred_lc, y_pred_rv_primary, y_pred_rv_secondary, sed_model = forward_model(params, data_dict, ecc_bool)   
         print('Successful computation.')
     except ValueError as e:
         print("Catching exception.")
