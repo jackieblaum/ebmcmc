@@ -114,21 +114,19 @@ class EBMCMC:
         if 90 < incl_init < 180:
             incl_init = 180 - incl_init
 
-        if ecc:
-            ecc_init = self.bundle.get_value("ecc@binary@component")
-            per0_init = self.bundle.get_value("per0@binary@component")
-            init_vals = [teffratio_init, incl_init, requivsumfrac_init, requiv_secondary_init, 
-                q_init, t0_supconj_init, asini_init, teff_secondary_init, period_init, 
-                sigma_lnf_init, ecc_init, per0_init]
-            for pblum in pblums_init:
-                init_vals.append(pblum)
-            return init_vals
-        
         init_vals = [teffratio_init, incl_init, requivsumfrac_init, requiv_secondary_init, 
                 q_init, t0_supconj_init, asini_init, teff_secondary_init, period_init, 
                 sigma_lnf_init]
+
+        if ecc:
+            ecc_init = self.bundle.get_value("ecc@binary@component")
+            per0_init = self.bundle.get_value("per0@binary@component")
+            init_vals.append(ecc_init)
+            init_vals.append(per0_init)
+    
         for pblum in pblums_init:
             init_vals.append(pblum)
+            
         print("Initial Values:")
         print("teffratio:", init_vals[0])
         print("incl:", init_vals[1])
