@@ -126,7 +126,7 @@ class EBMCMC:
     
         for pblum in pblums_init:
             init_vals.append(pblum)
-            
+
         print("Initial Values:")
         print("teffratio:", init_vals[0])
         print("incl:", init_vals[1])
@@ -156,6 +156,11 @@ class EBMCMC:
         
         scales = [0.02, 0.2, 0.01, 0.02, 
                 0.01, 0.0002, 0.2, 20, 0.1, 1]
+        ecc_scale = 0.01
+        per0_scale = 1
+        if ecc:
+            scales.append(ecc_scale)
+            scales.append(per0_scale)
         for _ in range(len(initial_guess) - len(scales)):
             scales.append(0.05)
         scales = np.array(scales)
@@ -197,7 +202,6 @@ class EBMCMC:
             autocorr = np.empty(max_n // (100 * thin))  # Adjusted for thinning
             old_tau = np.inf  # Previous autocorrelation time for comparison
 
-            print(p0)
             # Run sampling up to `max_n` steps with periodic convergence checks
             for sample in sampler.sample(p0, iterations=max_n, progress=True, thin=thin):
                 # Skip initial burn-in period
