@@ -2,8 +2,6 @@ import phoebe
 import numpy as np
 import binarysed
 
-phoebe.mpi_off()
-
 def lnprob(params, data_dict, q_init, period_init, sigma_lnf_range, t0_range, ecc_bool):
     """
     Computes the log-probability by combining the log-prior and the log-likelihood.
