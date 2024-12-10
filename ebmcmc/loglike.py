@@ -173,9 +173,9 @@ def forward_model(params, data_dict, ecc_bool):
     logg_secondary = b.get_value("logg@secondary@component")
 
     if teff_primary < 3000 or logg_primary > 5:
-        b.set_value('ld_coeffs_source@primary', value='phoenix')
+        b.set_value_all('ld_coeffs_source@primary', value='phoenix')
     if teff_secondary < 3000 or logg_secondary > 5:
-        b.set_value('ld_coeffs_source@secondary', value='phoenix')
+        b.set_value_all('ld_coeffs_source@secondary', value='phoenix')
 
     # Set eccentricity and periastron, if needed
     if ecc_bool:
