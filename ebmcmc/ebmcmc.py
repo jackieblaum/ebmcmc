@@ -23,6 +23,7 @@ class EBMCMC:
         self.sed = sed
         self.min_time = 1e9
         self.max_time = 0
+        self.rvs = False
         self.data_dict = self.create_data_dict(datasets=datasets)
         self.eclipsing = eclipsing
         self.ecc = ecc
@@ -56,6 +57,7 @@ class EBMCMC:
                 data_dict[dataset] = self.extract_light_curve_data(dataset)
             elif dataset.startswith("rv"):
                 data_dict[dataset] = self.extract_rv_data(dataset)
+                self.rvs = True
             else:
                 raise ValueError(f"Unrecognized dataset type: {dataset}")
 
@@ -118,6 +120,9 @@ class EBMCMC:
                 q_init, t0_supconj_init, asini_init, teff_secondary_init, period_init, 
                 sigma_lnf_init]
 
+        if self.rvs:
+            vgamma_init = self.bundle.get_value('vgamma@system')
+            init_vals.append(vgamma_init)
         if ecc:
             ecc_init = self.bundle.get_value("ecc@binary@component")
             per0_init = self.bundle.get_value("per0@binary@component")
@@ -138,9 +143,11 @@ class EBMCMC:
         print("teff_secondary:", init_vals[7])
         print("period:", init_vals[8])
         print("sigma_lnf:", init_vals[9])
+        if self.rvs:
+            print("vgamma:", init_vals[10])
         if ecc:
-            print("ecc:", init_vals[10])
-            print("per0:", init_vals[11])
+            print("ecc:", init_vals[11])
+            print("per0:", init_vals[12])
         for i, pblum in enumerate(pblums_init):
             print(f"pblum_{i+1}:", pblum)
         return init_vals
@@ -149,15 +156,18 @@ class EBMCMC:
     def sample(self, ecc=True, nwalkers=32, nsteps=5000, threads=16):
         """Runs MCMC sampling using emcee."""
 
-        initial_guess = self.get_initial_values(ecc)
+        initial_guess = self.get_initial_values(ecc, self.rvs)
         # print(initial_guess)
         if initial_guess is None:
             raise ValueError("Initial values for parameters cannot be found.")
         
         scales = [0.02, 0.2, 0.01, 0.02, 
                 0.01, 0.0002, 0.2, 20, 0.1, 1]
+        vgamma_scale = 10
         ecc_scale = 0.01
         per0_scale = 1
+        if self.rvs:
+            scales.append(vgamma_scale)
         if ecc:
             scales.append(ecc_scale)
             scales.append(per0_scale)
@@ -189,15 +199,15 @@ class EBMCMC:
             sampler = emcee.EnsembleSampler(nwalkers, 
                                             ndim, 
                                             lnprob, 
-                                            args=[self.data_dict, q_init, period_init, sigma_lnf_range, t0_range, ecc], 
+                                            args=[self.data_dict, q_init, period_init, sigma_lnf_range, t0_range, ecc, self.rvs], 
                                             pool=pool,
                                             backend=backend)
 
             print("Running sampling with convergence checks...")
 
             max_n = 100000  # Maximum number of steps
-            thin = 7       # Keep every 10th sample to reduce autocorrelation (adjust as needed)
-            burn_in = 50  # Number of samples to discard as burn-in
+            thin = 1       # Keep every 10th sample to reduce autocorrelation (adjust as needed)
+            burn_in = 2000  # Number of samples to discard as burn-in
             index = 0       # To track the number of autocorrelation checks
             autocorr = np.empty(max_n // (100 * thin))  # Adjusted for thinning
             old_tau = np.inf  # Previous autocorrelation time for comparison

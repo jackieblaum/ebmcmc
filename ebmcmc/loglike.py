@@ -2,7 +2,7 @@ import phoebe
 import numpy as np
 import binarysed
 
-def lnprob(params, data_dict, q_init, period_init, sigma_lnf_range, t0_range, ecc_bool):
+def lnprob(params, data_dict, q_init, period_init, sigma_lnf_range, t0_range, ecc_bool, rv_bool):
     """
     Computes the log-probability by combining the log-prior and the log-likelihood.
     
@@ -16,12 +16,12 @@ def lnprob(params, data_dict, q_init, period_init, sigma_lnf_range, t0_range, ec
     Returns:
         float: The combined log-probability.
     """
-    lp = lnprior(params, q_init, period_init, sigma_lnf_range, t0_range, ecc_bool)
+    lp = lnprior(params, q_init, period_init, sigma_lnf_range, t0_range, ecc_bool, rv_bool)
     if not np.isfinite(lp):
         return -np.inf
-    return lp + lnlikelihood(params, data_dict, ecc_bool)
+    return lp + lnlikelihood(params, data_dict, ecc_bool, rv_bool)
 
-def lnprior(params, q_init, period_init, sigma_lnf_range, t0_range, ecc_bool):
+def lnprior(params, q_init, period_init, sigma_lnf_range, t0_range, ecc_bool, rv_bool):
     """
     Defines the log-prior function for the parameters.
     
@@ -34,9 +34,11 @@ def lnprior(params, q_init, period_init, sigma_lnf_range, t0_range, ecc_bool):
     # Unpack parameters
     (teffratio, incl, requivsumfrac, requiv_secondary, q, t0_supconj, asini,
      teff_secondary, period, sigma_lnf) = params[:10]
+    if rv_bool:
+        vgamma = params[10]
     if ecc_bool:
-        (ecc, per0) = params[10:12]
-        pblums = params[12:]
+        (ecc, per0) = params[11:13]
+        pblums = params[13:]
         if not (0 < ecc < 1):
             return -np.inf
         if not (0 < per0 < 360):
@@ -75,6 +77,9 @@ def lnprior(params, q_init, period_init, sigma_lnf_range, t0_range, ecc_bool):
     if not (1e-6 < asini < 1e6):
         print(f"asini value: {incl}")
         return -np.inf
+    if not (-200 < vgamma < 200):
+        print(f"vgamma value: {vgamma}")
+        return -np.inf
     if not (0 < np.all(pblums) < 1e6):
         print(f"pblums value: {pblums}")
         return -np.inf
@@ -86,7 +91,7 @@ def lnprior(params, q_init, period_init, sigma_lnf_range, t0_range, ecc_bool):
 
     return log_prior_q + log_prior_period
 
-def forward_model(params, data_dict, ecc_bool):
+def forward_model(params, data_dict, ecc_bool, rv_bool):
 
     # Unpack the input parameters
     (
@@ -99,15 +104,17 @@ def forward_model(params, data_dict, ecc_bool):
         asini,
         teff_secondary,
         period,
-        _,
+        _
     ) = params[:10]
 
+    if rv_bool:
+        vgamma = params[10]
     if ecc_bool:
-        ecc, per0 = params[10:12]
-        pblums = params[12:]
+        ecc, per0 = params[11:13]
+        pblums = params[13:]
     else:
         ecc, per0 = 0, 0
-        pblums = params[10:]
+        pblums = params[11:]
 
     # Create a new PHOEBE bundle and set the parameters
     b = phoebe.default_binary()
@@ -177,6 +184,9 @@ def forward_model(params, data_dict, ecc_bool):
     if teff_secondary < 3000 or logg_secondary > 5:
         b.set_value_all('ld_coeffs_source@secondary', value='phoenix')
 
+    if rv_bool:
+        b.set_value("vgamma@system", vgamma)
+
     # Set eccentricity and periastron, if needed
     if ecc_bool:
         b.set_value("ecc@binary@component", ecc)
@@ -230,7 +240,7 @@ def forward_model(params, data_dict, ecc_bool):
     return y_pred_lc, y_pred_rv_primary, y_pred_rv_secondary, sed_model
 
 
-def lnlikelihood(params, data_dict, ecc_bool):
+def lnlikelihood(params, data_dict, ecc_bool, rv_bool):
     """
     Computes the log-likelihood for the given model parameters and observed data.
 
@@ -243,7 +253,7 @@ def lnlikelihood(params, data_dict, ecc_bool):
     """
 
     try:
-        y_pred_lc, y_pred_rv_primary, y_pred_rv_secondary, sed_model = forward_model(params, data_dict, ecc_bool)   
+        y_pred_lc, y_pred_rv_primary, y_pred_rv_secondary, sed_model = forward_model(params, data_dict, ecc_bool, rv_bool)   
         print('Successful computation.')
     except ValueError as e:
         print("Catching exception.")
