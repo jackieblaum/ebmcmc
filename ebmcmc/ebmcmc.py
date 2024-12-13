@@ -156,7 +156,7 @@ class EBMCMC:
     def sample(self, ecc=True, nwalkers=32, nsteps=5000, threads=16):
         """Runs MCMC sampling using emcee."""
 
-        initial_guess = self.get_initial_values(ecc, self.rvs)
+        initial_guess = self.get_initial_values(ecc)
         # print(initial_guess)
         if initial_guess is None:
             raise ValueError("Initial values for parameters cannot be found.")
