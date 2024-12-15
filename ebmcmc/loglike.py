@@ -36,6 +36,9 @@ def lnprior(params, q_init, period_init, sigma_lnf_range, t0_range, ecc_bool, rv
      teff_secondary, period, sigma_lnf) = params[:10]
     if rv_bool:
         vgamma = params[10]
+        if not (-200 < vgamma < 200):
+            print(f"vgamma value: {vgamma}")
+            return -np.inf
     if ecc_bool:
         (ecc, per0) = params[11:13]
         pblums = params[13:]
@@ -76,9 +79,6 @@ def lnprior(params, q_init, period_init, sigma_lnf_range, t0_range, ecc_bool, rv
         return -np.inf
     if not (1e-6 < asini < 1e6):
         print(f"asini value: {incl}")
-        return -np.inf
-    if not (-200 < vgamma < 200):
-        print(f"vgamma value: {vgamma}")
         return -np.inf
     if not (0 < np.all(pblums) < 1e6):
         print(f"pblums value: {pblums}")
