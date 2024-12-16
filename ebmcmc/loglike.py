@@ -215,24 +215,28 @@ def forward_model(params, data_dict, ecc_bool, rv_bool):
     )
 
     if "sed" in data_dict:
-        sed_obj = binarysed.SED(data_dict["sed"])
-        wavelengths = data_dict["sed"]["wavelengths"]
-        teff_primary = b.get_value("teff@primary@component")
-        teff_secondary = b.get_value("teff@secondary@component")
-        requiv_primary = b.get_value("requiv@primary@component")
-        requiv_secondary = b.get_value("requiv@secondary@component")
-        logg1 = b.get_value("logg@primary@component")
-        logg2 = b.get_value("logg@secondary@component")
+        if np.isnan(data_dict["sed"]["dist"]):
+            print("No distance available; leaving SED out of the fit.")
+            sed_model = None
+        else:
+            sed_obj = binarysed.SED(data_dict["sed"])
+            wavelengths = data_dict["sed"]["wavelengths"]
+            teff_primary = b.get_value("teff@primary@component")
+            teff_secondary = b.get_value("teff@secondary@component")
+            requiv_primary = b.get_value("requiv@primary@component")
+            requiv_secondary = b.get_value("requiv@secondary@component")
+            logg1 = b.get_value("logg@primary@component")
+            logg2 = b.get_value("logg@secondary@component")
 
-        sed_model = sed_obj.create_apparent_sed(
-            wavelengths,
-            teff_primary,
-            teff_secondary,
-            requiv_primary,
-            requiv_secondary,
-            logg1,
-            logg2,
-            select_wavelengths=True
+            sed_model = sed_obj.create_apparent_sed(
+                wavelengths,
+                teff_primary,
+                teff_secondary,
+                requiv_primary,
+                requiv_secondary,
+                logg1,
+                logg2,
+                select_wavelengths=True
         )
     else:
         sed_model = None
