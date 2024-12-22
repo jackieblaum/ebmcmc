@@ -105,7 +105,6 @@ class EBMCMC:
             for dataset in self.bundle.datasets
             if dataset.startswith("lc")
         ]
-        sigma_lnf_init = -10
 
         if q_init > 1:
             q_init = m1 / m2
@@ -118,7 +117,7 @@ class EBMCMC:
 
         init_vals = [teffratio_init, incl_init, requivsumfrac_init, requiv_secondary_init, 
                 q_init, t0_supconj_init, asini_init, teff_secondary_init, period_init, 
-                sigma_lnf_init]
+                ]
 
         if self.rvs:
             vgamma_init = self.bundle.get_value('vgamma@system')
@@ -142,12 +141,11 @@ class EBMCMC:
         print("asini:", init_vals[6])
         print("teff_secondary:", init_vals[7])
         print("period:", init_vals[8])
-        print("sigma_lnf:", init_vals[9])
         if self.rvs:
-            print("vgamma:", init_vals[10])
+            print("vgamma:", init_vals[9])
         if ecc:
-            print("ecc:", init_vals[11])
-            print("per0:", init_vals[12])
+            print("ecc:", init_vals[10])
+            print("per0:", init_vals[11])
         for i, pblum in enumerate(pblums_init):
             print(f"pblum_{i+1}:", pblum)
         return init_vals
@@ -176,7 +174,6 @@ class EBMCMC:
         scales = np.array(scales)
         q_init = initial_guess[4]
         period_init = initial_guess[8]
-        sigma_lnf_range = [-15, -1]
         t0_range = [self.min_time, self.max_time]
 
         filename = '{}/mcmc.h5'.format(self.run_dir)
@@ -199,7 +196,7 @@ class EBMCMC:
             sampler = emcee.EnsembleSampler(nwalkers, 
                                             ndim, 
                                             lnprob, 
-                                            args=[self.data_dict, q_init, period_init, sigma_lnf_range, t0_range, ecc, self.rvs], 
+                                            args=[self.data_dict, q_init, period_init, t0_range, ecc, self.rvs], 
                                             pool=pool,
                                             backend=backend)
 

@@ -2,7 +2,7 @@ import phoebe
 import numpy as np
 import binarysed
 
-def lnprob(params, data_dict, q_init, period_init, sigma_lnf_range, t0_range, ecc_bool, rv_bool):
+def lnprob(params, data_dict, q_init, period_init, t0_range, ecc_bool, rv_bool):
     """
     Computes the log-probability by combining the log-prior and the log-likelihood.
     
@@ -11,17 +11,16 @@ def lnprob(params, data_dict, q_init, period_init, sigma_lnf_range, t0_range, ec
         data_dict (dict): A dictionary containing the observed data.
         q_init (float): Initial estimate for q.
         period_init (float): Initial estimate for period.
-        sigma_lnf_range (tuple): Range for sigma_lnf.
     
     Returns:
         float: The combined log-probability.
     """
-    lp = lnprior(params, q_init, period_init, sigma_lnf_range, t0_range, ecc_bool, rv_bool)
+    lp = lnprior(params, q_init, period_init, t0_range, ecc_bool, rv_bool)
     if not np.isfinite(lp):
         return -np.inf
     return lp + lnlikelihood(params, data_dict, ecc_bool, rv_bool)
 
-def lnprior(params, q_init, period_init, sigma_lnf_range, t0_range, ecc_bool, rv_bool):
+def lnprior(params, q_init, period_init, t0_range, ecc_bool, rv_bool):
     """
     Defines the log-prior function for the parameters.
     
@@ -33,21 +32,21 @@ def lnprior(params, q_init, period_init, sigma_lnf_range, t0_range, ecc_bool, rv
     """
     # Unpack parameters
     (teffratio, incl, requivsumfrac, requiv_secondary, q, t0_supconj, asini,
-     teff_secondary, period, sigma_lnf) = params[:10]
+     teff_secondary, period) = params[:9]
     if rv_bool:
-        vgamma = params[10]
+        vgamma = params[9]
         if not (-200 < vgamma < 200):
             print(f"vgamma value: {vgamma}")
             return -np.inf
     if ecc_bool:
-        (ecc, per0) = params[11:13]
-        pblums = params[13:]
+        (ecc, per0) = params[10:12]
+        pblums = params[12:]
         if not (0 < ecc < 1):
             return -np.inf
         if not (0 < per0 < 360):
             return -np.inf
     else:
-        pblums = params[10:]
+        pblums = params[9:]
 
     # Check priors
     if not (0 < teffratio <= 1.2):
@@ -67,9 +66,6 @@ def lnprior(params, q_init, period_init, sigma_lnf_range, t0_range, ecc_bool, rv
         return -np.inf
     if not (1e-6 < period < 1e6):
         print(f"period value: {period}")
-        return -np.inf
-    if not (sigma_lnf_range[0] < sigma_lnf < sigma_lnf_range[1]):
-        print(f"sigma_lnf value: {sigma_lnf}")
         return -np.inf
     if not (300 < teff_secondary < 1e6):
         print(f"teff_secondary value: {teff_secondary}")
@@ -264,14 +260,12 @@ def lnlikelihood(params, data_dict, ecc_bool, rv_bool):
         print(e)
         return -np.inf
     
-    sigma_lnf = params[9]
-
     # Calculate chi-squared for light curves
     chi2_lc = 0
     for dataset, y_pred in zip(data_dict, y_pred_lc):
         data_lc = data_dict[dataset]["data"]
         sigma_lc = data_dict[dataset]["sigmas"]
-        sigma_lc_sq = sigma_lc**2 + y_pred**2 * np.exp(2 * sigma_lnf)
+        sigma_lc_sq = sigma_lc**2 # + y_pred**2 * np.exp(2 * sigma_lnf)
         chi2_lc += np.sum(np.log(sigma_lc_sq) + (data_lc - y_pred) ** 2 / sigma_lc_sq) / len(data_lc)
 
     # Calculate chi-squared for RVs, if present
