@@ -99,18 +99,17 @@ def forward_model(params, data_dict, ecc_bool, rv_bool):
         t0_supconj,
         asini,
         teff_secondary,
-        period,
-        _
-    ) = params[:10]
+        period    
+    ) = params[:9]
 
     if rv_bool:
-        vgamma = params[10]
+        vgamma = params[9]
     if ecc_bool:
-        ecc, per0 = params[11:13]
-        pblums = params[13:]
+        ecc, per0 = params[10:12]
+        pblums = params[12:]
     else:
         ecc, per0 = 0, 0
-        pblums = params[11:]
+        pblums = params[9:]
 
     # Create a new PHOEBE bundle and set the parameters
     b = phoebe.default_binary()
