@@ -174,7 +174,7 @@ class EBMCMC:
         scales = np.array(scales)
         q_init = initial_guess[4]
         period_init = initial_guess[8]
-        t0_range = [self.min_time, self.max_time]
+        t0_init = initial_guess[5]
 
         filename = '{}/mcmc.h5'.format(self.run_dir)
         backend = emcee.backends.HDFBackend(filename)
@@ -196,7 +196,7 @@ class EBMCMC:
             sampler = emcee.EnsembleSampler(nwalkers, 
                                             ndim, 
                                             lnprob, 
-                                            args=[self.data_dict, q_init, period_init, t0_range, ecc, self.rvs], 
+                                            args=[self.data_dict, q_init, period_init, t0_init, ecc, self.rvs], 
                                             pool=pool,
                                             backend=backend)
 

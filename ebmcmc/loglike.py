@@ -2,7 +2,7 @@ import phoebe
 import numpy as np
 import binarysed
 
-def lnprob(params, data_dict, q_init, period_init, t0_range, ecc_bool, rv_bool):
+def lnprob(params, data_dict, q_init, period_init, t0_init, ecc_bool, rv_bool):
     """
     Computes the log-probability by combining the log-prior and the log-likelihood.
     
@@ -15,12 +15,12 @@ def lnprob(params, data_dict, q_init, period_init, t0_range, ecc_bool, rv_bool):
     Returns:
         float: The combined log-probability.
     """
-    lp = lnprior(params, q_init, period_init, t0_range, ecc_bool, rv_bool)
+    lp = lnprior(params, q_init, period_init, t0_init, ecc_bool, rv_bool)
     if not np.isfinite(lp):
         return -np.inf
     return lp + lnlikelihood(params, data_dict, ecc_bool, rv_bool)
 
-def lnprior(params, q_init, period_init, t0_range, ecc_bool, rv_bool):
+def lnprior(params, q_init, period_init, t0_init, ecc_bool, rv_bool):
     """
     Defines the log-prior function for the parameters.
     
@@ -70,9 +70,6 @@ def lnprior(params, q_init, period_init, t0_range, ecc_bool, rv_bool):
     if not (300 < teff_secondary < 1e6):
         print(f"teff_secondary value: {teff_secondary}")
         return -np.inf
-    if not (t0_range[0] < t0_supconj < t0_range[1]):
-        print(f"t0_supconj value: {t0_supconj}")
-        return -np.inf
     if not (1e-6 < asini < 1e6):
         print(f"asini value: {incl}")
         return -np.inf
@@ -84,8 +81,9 @@ def lnprior(params, q_init, period_init, t0_range, ecc_bool, rv_bool):
     # Uniform priors return 0 (log(1)); if Gaussian, use -0.5 * ((param - mu)/sigma)**2
     log_prior_q = -0.5 * ((q - q_init) / (q_init * 0.1))**2  # Gaussian prior with mean q_init and std dev 0.1 * q_init
     log_prior_period = -0.5 * ((period - period_init) / (0.1 * period_init))**2
+    log_prior_t0_supconj = -0.5 * ((t0_supconj - t0_init) / (0.1 * period_init))**2
 
-    return log_prior_q + log_prior_period
+    return log_prior_q + log_prior_period + log_prior_t0_supconj
 
 def forward_model(params, data_dict, ecc_bool, rv_bool):
 
