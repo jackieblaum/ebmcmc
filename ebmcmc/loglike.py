@@ -52,11 +52,14 @@ def lnprior(params, q_init, period_init, t0_init, ecc_bool, rv_bool):
     if not (0 < teffratio <= 1.2):
         print(f"teffratio value: {teffratio}")
         return -np.inf
-    if not (0 < incl < 90):
-        print(f"incl value: {incl}")
-        return -np.inf
     if not (0 < requivsumfrac < 1):
         print(f"requivsumfrac value: {incl}")
+        return -np.inf
+    # TODO: only use i_max if not eclipsing, otherwise i_max=90
+    i_max_rad = np.arccos(requivsumfrac)
+    i_max = np.degrees(i_max_rad)
+    if not (0 < incl < i_max):
+        print(f"incl value: {incl}")
         return -np.inf
     if not (1e-6 < requiv_secondary < 1e6):
         print(f"requiv_secondary value: {incl}")
@@ -67,7 +70,7 @@ def lnprior(params, q_init, period_init, t0_init, ecc_bool, rv_bool):
     if not (1e-6 < period < 1e6):
         print(f"period value: {period}")
         return -np.inf
-    if not (300 < teff_secondary < 1e6):
+    if not (2500 < teff_secondary < 50000):
         print(f"teff_secondary value: {teff_secondary}")
         return -np.inf
     if not (1e-6 < asini < 1e6):
@@ -77,13 +80,15 @@ def lnprior(params, q_init, period_init, t0_init, ecc_bool, rv_bool):
         print(f"pblums value: {pblums}")
         return -np.inf
 
-    # More priors as needed for other parameters
+    # More priors for other parameters
+    log_prior_incl = np.log(np.sin(np.radians(incl)))  # sin(i) prior for random orientation
+
     # Uniform priors return 0 (log(1)); if Gaussian, use -0.5 * ((param - mu)/sigma)**2
     log_prior_q = -0.5 * ((q - q_init) / (q_init * 0.1))**2  # Gaussian prior with mean q_init and std dev 0.1 * q_init
-    log_prior_period = -0.5 * ((period - period_init) / (0.1 * period_init))**2
-    log_prior_t0_supconj = -0.5 * ((t0_supconj - t0_init) / (0.1 * period_init))**2
+    log_prior_period = -0.5 * ((period - period_init) / (0.01 * period_init))**2
+    log_prior_t0_supconj = -0.5 * ((t0_supconj - t0_init) / (0.01 * period_init))**2
 
-    return log_prior_q + log_prior_period + log_prior_t0_supconj
+    return log_prior_incl + log_prior_q + log_prior_period + log_prior_t0_supconj
 
 def forward_model(params, data_dict, ecc_bool, rv_bool):
 
