@@ -93,12 +93,11 @@ class EBMCMC:
         period_init = self.bundle.get_value("period@binary@component")
         m1 = self.bundle.get_value("mass@primary@component")
         m2 = self.bundle.get_value("mass@secondary@component")
+        Msum_init = m1 + m2
         q_init = self.bundle.get_value("q@binary@component")
         incl_init = self.bundle.get_value("incl@binary@component")
-        asini_init = self.bundle.get_value("asini@binary@component")
-        requivsumfrac_init = self.bundle.get_value("requivsumfrac@binary@component")
-        teffratio_init = self.bundle.get_value("teffratio@binary@component")
-        teff_secondary_init = self.bundle.get_value("teff@secondary@component")
+        # asini_init = self.bundle.get_value("asini@binary@component")
+        # requivsumfrac_init = self.bundle.get_value("requivsumfrac@binary@component")
         t0_supconj_init = self.bundle.get_value('t0_supconj@binary@component')
         pblums_init = [
             self.bundle.get_value(f"pblum@primary@{dataset}@dataset")
@@ -108,15 +107,24 @@ class EBMCMC:
 
         if q_init > 1:
             q_init = m1 / m2
-            requiv_secondary_init = self.bundle.get_value("requiv@primary@component")
+            requiv1_init = self.bundle.get_value("requiv@secondary@component")
+            requiv2_init = self.bundle.get_value("requiv@primary@component")
+            teff1_init = self.bundle.get_value("teff@secondary@component")
+            teff2_init = self.bundle.get_value("teff@primary@component")
         else:
-            requiv_secondary_init = self.bundle.get_value("requiv@secondary@component")
+            requiv1_init = self.bundle.get_value("requiv@primary@component")
+            requiv2_init = self.bundle.get_value("requiv@secondary@component")
+            teff1_init = self.bundle.get_value("teff@primary@component")
+            teff2_init = self.bundle.get_value("teff@secondary@component")
 
         if 90 < incl_init < 180:
             incl_init = 180 - incl_init
 
-        init_vals = [teffratio_init, incl_init, requivsumfrac_init, requiv_secondary_init, 
-                q_init, t0_supconj_init, asini_init, teff_secondary_init, period_init, 
+        # init_vals = [teffratio_init, incl_init, requivsumfrac_init, requiv_secondary_init, 
+        #         q_init, t0_supconj_init, asini_init, teff_secondary_init, period_init, 
+        #         ]
+        init_vals = [q_init, Msum_init, period_init, t0_supconj_init, teff1_init, 
+                     teff2_init, requiv1_init, requiv2_init, incl_init
                 ]
 
         if self.rvs:
@@ -131,23 +139,23 @@ class EBMCMC:
         for pblum in pblums_init:
             init_vals.append(pblum)
 
-        print("Initial Values:")
-        print("teffratio:", init_vals[0])
-        print("incl:", init_vals[1])
-        print("requivsumfrac:", init_vals[2])
-        print("requiv_secondary:", init_vals[3])
-        print("q:", init_vals[4])
-        print("t0_supconj:", init_vals[5])
-        print("asini:", init_vals[6])
-        print("teff_secondary:", init_vals[7])
-        print("period:", init_vals[8])
-        if self.rvs:
-            print("vgamma:", init_vals[9])
-        if ecc:
-            print("ecc:", init_vals[10])
-            print("per0:", init_vals[11])
-        for i, pblum in enumerate(pblums_init):
-            print(f"pblum_{i+1}:", pblum)
+        # print("Initial Values:")
+        # print("teffratio:", init_vals[0])
+        # print("incl:", init_vals[1])
+        # print("requivsumfrac:", init_vals[2])
+        # print("requiv_secondary:", init_vals[3])
+        # print("q:", init_vals[4])
+        # print("t0_supconj:", init_vals[5])
+        # print("asini:", init_vals[6])
+        # print("teff_secondary:", init_vals[7])
+        # print("period:", init_vals[8])
+        # if self.rvs:
+        #     print("vgamma:", init_vals[9])
+        # if ecc:
+        #     print("ecc:", init_vals[10])
+        #     print("per0:", init_vals[11])
+        # for i, pblum in enumerate(pblums_init):
+        #     print(f"pblum_{i+1}:", pblum)
         return init_vals
 
 
@@ -159,8 +167,9 @@ class EBMCMC:
         if initial_guess is None:
             raise ValueError("Initial values for parameters cannot be found.")
         
-        scales = [0.02, 0.2, 0.01, 0.02, 
-                0.01, 0.0002, 0.2, 20, 0.1, 1]
+        # scales = [0.02, 0.2, 0.01, 0.02, 
+        #         0.01, 0.0002, 0.2, 20, 0.1, 1]
+        scales = [0.01, 0.1, 0.1, 0.0002, 200, 200, 0.02, 0.02, 0.2]
         vgamma_scale = 10
         ecc_scale = 0.01
         per0_scale = 1
@@ -172,9 +181,15 @@ class EBMCMC:
         for _ in range(len(initial_guess) - len(scales)):
             scales.append(0.05)
         scales = np.array(scales)
-        q_init = initial_guess[4]
-        period_init = initial_guess[8]
-        t0_init = initial_guess[5]
+        q_init = initial_guess[0]
+        Msum_init = initial_guess[1]
+        period_init = initial_guess[2]
+        t0_init = initial_guess[3]
+        incl_init = initial_guess[8]
+
+        G = 6.67430e-8            # Gravitational constant in cgs units
+        a_init = (G * Msum_init * (period_init * 86400)**2 / (4 * np.pi**2))**(1/3)  # Semi-major axis in cm
+        asini_init = a_init * np.sin(np.radians(incl_init))
 
         filename = '{}/mcmc.h5'.format(self.run_dir)
         backend = emcee.backends.HDFBackend(filename)
@@ -196,7 +211,7 @@ class EBMCMC:
             sampler = emcee.EnsembleSampler(nwalkers, 
                                             ndim, 
                                             lnprob, 
-                                            args=[self.data_dict, q_init, period_init, t0_init, ecc, self.rvs], 
+                                            args=[self.data_dict, q_init, asini_init, period_init, t0_init, ecc, self.rvs], 
                                             pool=pool,
                                             backend=backend)
 

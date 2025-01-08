@@ -2,7 +2,7 @@ import phoebe
 import numpy as np
 import binarysed
 
-def lnprob(params, data_dict, q_init, period_init, t0_init, ecc_bool, rv_bool):
+def lnprob(params, data_dict, q_init, asini_init, period_init, t0_init, ecc_bool, rv_bool):
     """
     Computes the log-probability by combining the log-prior and the log-likelihood.
     
@@ -15,12 +15,12 @@ def lnprob(params, data_dict, q_init, period_init, t0_init, ecc_bool, rv_bool):
     Returns:
         float: The combined log-probability.
     """
-    lp = lnprior(params, q_init, period_init, t0_init, ecc_bool, rv_bool)
+    lp = lnprior(params, q_init, asini_init, period_init, t0_init, ecc_bool, rv_bool)
     if not np.isfinite(lp):
         return -np.inf
     return lp + lnlikelihood(params, data_dict, ecc_bool, rv_bool)
 
-def lnprior(params, q_init, period_init, t0_init, ecc_bool, rv_bool):
+def lnprior(params, q_init, asini_init, period_init, t0_init, ecc_bool, rv_bool):
     """
     Defines the log-prior function for the parameters.
     
@@ -31,8 +31,9 @@ def lnprior(params, q_init, period_init, t0_init, ecc_bool, rv_bool):
         float: The log-prior value. Returns -∞ for parameters outside valid bounds.
     """
     # Unpack parameters
-    (teffratio, incl, requivsumfrac, requiv_secondary, q, t0_supconj, asini,
-     teff_secondary, period) = params[:9]
+    # (teffratio, incl, requivsumfrac, requiv_secondary, q, t0_supconj, asini,
+    #  teff_secondary, period) = params[:9]
+    (q, Msum, period, t0_supconj, teff1, teff2, requiv1, requiv2, incl) = params[:9]
     if rv_bool:
         vgamma = params[9]
         if not (-200 < vgamma < 200):
@@ -48,33 +49,38 @@ def lnprior(params, q_init, period_init, t0_init, ecc_bool, rv_bool):
     else:
         pblums = params[9:]
 
+    G = 6.67430e-8            # Gravitational constant in cgs units
+    a = (G * Msum * (period * 86400)**2 / (4 * np.pi**2))**(1/3)  # Semi-major axis in cm
+    requivsumfrac = (requiv1 + requiv2)/a
+    asini = a * np.sin(np.radians(incl))
+
     # Check priors
-    if not (0 < teffratio <= 1.2):
-        print(f"teffratio value: {teffratio}")
+    if not (0 < q <= 1):
+        print(f"q value: {q}")
         return -np.inf
-    if not (0 < requivsumfrac < 1):
-        print(f"requivsumfrac value: {incl}")
+    if not (0.1 < Msum < 500):  # Stellar mass range
+        print(f"Msum value: {Msum}")
+        return -np.inf
+    if not (1e-6 < period < 1e6):
+        print(f"period value: {period}")
+        return -np.inf
+    if not (2500 < teff1 < 50000):
+        print(f"teff_secondary value: {teff1}")
+        return -np.inf
+    if not (2500 < teff2 < 50000):
+        print(f"teff_secondary value: {teff2}")
+        return -np.inf
+    if not (1e-6 < requiv1 < a):
+        print(f"requiv_secondary value: {requiv1}")
+        return -np.inf
+    if not (1e-6 < requiv2 < a):
+        print(f"requiv_secondary value: {requiv2}")
         return -np.inf
     # TODO: only use i_max if not eclipsing, otherwise i_max=90
     i_max_rad = np.arccos(requivsumfrac)
     i_max = np.degrees(i_max_rad)
     if not (0 < incl < i_max):
         print(f"incl value: {incl}")
-        return -np.inf
-    if not (1e-6 < requiv_secondary < 1e6):
-        print(f"requiv_secondary value: {incl}")
-        return -np.inf
-    if not (0 < q <= 1):
-        print(f"q value: {q}")
-        return -np.inf
-    if not (1e-6 < period < 1e6):
-        print(f"period value: {period}")
-        return -np.inf
-    if not (2500 < teff_secondary < 50000):
-        print(f"teff_secondary value: {teff_secondary}")
-        return -np.inf
-    if not (1e-6 < asini < 1e6):
-        print(f"asini value: {incl}")
         return -np.inf
     if not (0 < np.all(pblums) < 1e6):
         print(f"pblums value: {pblums}")
@@ -88,21 +94,16 @@ def lnprior(params, q_init, period_init, t0_init, ecc_bool, rv_bool):
     log_prior_period = -0.5 * ((period - period_init) / (0.01 * period_init))**2
     log_prior_t0_supconj = -0.5 * ((t0_supconj - t0_init) / (0.01 * period_init))**2
 
-    return log_prior_incl + log_prior_q + log_prior_period + log_prior_t0_supconj
+    # Gaussian prior on asini
+    log_prior_asini = -0.5 * ((asini - asini_init) / (0.1*asini_init))**2
+
+    return log_prior_incl + log_prior_q + log_prior_period + log_prior_t0_supconj + log_prior_asini
 
 def forward_model(params, data_dict, ecc_bool, rv_bool):
 
     # Unpack the input parameters
-    (
-        teffratio,
-        incl,
-        requivsumfrac,
-        requiv_secondary,
-        q,
-        t0_supconj,
-        asini,
-        teff_secondary,
-        period    
+    (q, Msum, period, t0_supconj, teff1, teff2, 
+     requiv1, requiv2, incl
     ) = params[:9]
 
     if rv_bool:
@@ -150,36 +151,34 @@ def forward_model(params, data_dict, ecc_bool, rv_bool):
 
     b.set_value_all('ld_mode', 'lookup')
     # Set the PHOEBE parameters
-    b.flip_constraint("teffratio@binary@constraint", solve_for="teff@primary@component")
-    b.flip_constraint(
-        "requivsumfrac@binary@constraint", solve_for="requiv@primary@component"
-    )
-    b.flip_constraint("asini@binary@constraint", solve_for="sma@binary@component")
-
-    b.set_value("teffratio@binary@component", teffratio)
-    b.set_value("incl@binary@component", incl)
-    b.set_value("requivsumfrac@binary@component", requivsumfrac)
-    b.set_value("requiv@secondary@component", requiv_secondary)
+    b.flip_constraint("mass@primary", solve_for="sma@binary@component")
+    
+# q, Msum, period, t0_supconj, teff1, teff2, 
+#      requiv1, requiv2, incl
+    M1 = Msum / (1 + q)       # Primary mass
     b.set_value("q@binary@component", q)
-    b.set_value("t0_supconj@binary@component", t0_supconj)
-    b.set_value("asini@binary@component", asini)
-    b.set_value("teff@secondary@component", teff_secondary)
+    b.set_value("mass@primary@component", M1)
     b.set_value("period@binary@component", period)
+    b.set_value("t0_supconj@binary@component", t0_supconj)
+    b.set_value("teff@primary@component", teff1)
+    b.set_value("teff@secondary@component", teff2)
+    b.set_value("requiv@primary@component", requiv1)
+    b.set_value("requiv@secondary@component", requiv2)
+    b.set_value("incl@binary@component", incl)
 
-    if teff_secondary > 8000:
-        b.set_value("gravb_bol@secondary", value=0.9)
-        b.set_value("irrad_frac_refl_bol@secondary", value=1.0)
-    teff_primary = b.get_value("teff@primary@component")
-    if teff_primary > 8000:
+    if teff1 > 8000:
         b.set_value("gravb_bol@primary", value=0.9)
         b.set_value("irrad_frac_refl_bol@primary", value=1.0)
+    if teff2 > 8000:
+        b.set_value("gravb_bol@secondary", value=0.9)
+        b.set_value("irrad_frac_refl_bol@secondary", value=1.0)
 
     logg_primary = b.get_value("logg@primary@component")
     logg_secondary = b.get_value("logg@secondary@component")
 
-    if teff_primary < 3000 or logg_primary > 5:
+    if teff1 < 3000 or logg_primary > 5:
         b.set_value_all('ld_coeffs_source@primary', value='phoenix')
-    if teff_secondary < 3000 or logg_secondary > 5:
+    if teff2 < 3000 or logg_secondary > 5:
         b.set_value_all('ld_coeffs_source@secondary', value='phoenix')
 
     if rv_bool:
@@ -219,19 +218,15 @@ def forward_model(params, data_dict, ecc_bool, rv_bool):
         else:
             sed_obj = binarysed.SED(data_dict["sed"])
             wavelengths = data_dict["sed"]["wavelengths"]
-            teff_primary = b.get_value("teff@primary@component")
-            teff_secondary = b.get_value("teff@secondary@component")
-            requiv_primary = b.get_value("requiv@primary@component")
-            requiv_secondary = b.get_value("requiv@secondary@component")
             logg1 = b.get_value("logg@primary@component")
             logg2 = b.get_value("logg@secondary@component")
 
             sed_model = sed_obj.create_apparent_sed(
                 wavelengths,
-                teff_primary,
-                teff_secondary,
-                requiv_primary,
-                requiv_secondary,
+                teff1,
+                teff2,
+                requiv1,
+                requiv2,
                 logg1,
                 logg2,
                 select_wavelengths=True
