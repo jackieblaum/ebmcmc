@@ -263,7 +263,7 @@ def lnlikelihood(params, data_dict, ecc_bool, rv_bool):
         data_lc = data_dict[dataset]["data"]
         sigma_lc = data_dict[dataset]["sigmas"]
         sigma_lc_sq = sigma_lc**2 # + y_pred**2 * np.exp(2 * sigma_lnf)
-        chi2_lc += np.sum(np.log(sigma_lc_sq) + (data_lc - y_pred) ** 2 / sigma_lc_sq) / len(data_lc)
+        chi2_lc += np.sum(np.log(sigma_lc_sq) + (data_lc - y_pred) ** 2 / sigma_lc_sq)
 
     # Calculate chi-squared for RVs, if present
     chi2_rv = 0
@@ -274,10 +274,10 @@ def lnlikelihood(params, data_dict, ecc_bool, rv_bool):
         data_rv2 = data_dict[dataset]["secondary"]
         chi2_rv += np.sum(
             np.log(sigma_rv1**2) + (data_rv1 - y_pred_rv_primary) ** 2 / sigma_rv1**2
-        ) / len(data_rv1)
+        )
         chi2_rv += np.sum(
             np.log(sigma_rv2**2) + (data_rv2 - y_pred_rv_secondary) ** 2 / sigma_rv2**2
-        ) / len(data_rv2)
+        )
 
     # Calculate chi-squared for SED, if provided
     chi2_sed = 0
@@ -287,9 +287,9 @@ def lnlikelihood(params, data_dict, ecc_bool, rv_bool):
 
         chi2_sed = np.sum(
             np.log(obs_flux_errs**2) + (obs_fluxes - sed_model) ** 2 / obs_flux_errs**2
-        ) / len(obs_fluxes)
+        )
 
     # Return the total log-likelihood
-    # print(f"Chi2: LC - {chi2_lc}, RV - {chi2_rv}, SED - {chi2_sed}")
+    print(f"Chi2: LC - {chi2_lc}, RV - {chi2_rv}, SED - {chi2_sed}")
     chi2 = chi2_lc + chi2_rv + chi2_sed
     return -0.5 * chi2
