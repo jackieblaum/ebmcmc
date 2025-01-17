@@ -195,8 +195,8 @@ def forward_model(params, data_dict, ecc_bool, rv_bool):
             b.set_value(f"pblum@primary@{dataset}@dataset", pblum)
 
     # Run PHOEBE computation
-    b.add_compute("ellc", compute="fastcompute")
-    b.run_compute(compute="fastcompute")
+    # b.add_compute("ellc", compute="fastcompute")
+    b.run_compute(compute="phoebe01")
 
     # Get model predictions for light curves (LCs) and radial velocities (RVs)
     y_pred_lc = [
