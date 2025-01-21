@@ -2,7 +2,7 @@ import phoebe
 import numpy as np
 import binarysed
 
-def lnprob(params, data_dict, q_init, asini_init, period_init, t0_init, ecc_bool, rv_bool):
+def lnprob(params, data_dict, q_init, asini_init, period_init, t0_init, ecc_bool, rv_bool, eclipsing):
     """
     Computes the log-probability by combining the log-prior and the log-likelihood.
     
@@ -15,12 +15,12 @@ def lnprob(params, data_dict, q_init, asini_init, period_init, t0_init, ecc_bool
     Returns:
         float: The combined log-probability.
     """
-    lp = lnprior(params, q_init, asini_init, period_init, t0_init, ecc_bool, rv_bool)
+    lp = lnprior(params, q_init, asini_init, period_init, t0_init, ecc_bool, rv_bool, eclipsing)
     if not np.isfinite(lp):
         return -np.inf
     return lp + lnlikelihood(params, data_dict, ecc_bool, rv_bool)
 
-def lnprior(params, q_init, asini_init, period_init, t0_init, ecc_bool, rv_bool):
+def lnprior(params, q_init, asini_init, period_init, t0_init, ecc_bool, rv_bool, eclipsing):
     """
     Defines the log-prior function for the parameters.
     
@@ -76,12 +76,15 @@ def lnprior(params, q_init, asini_init, period_init, t0_init, ecc_bool, rv_bool)
     if not (1e-6 < requiv2 < a):
         print(f"requiv_secondary value: {requiv2}")
         return -np.inf
-    # TODO: only use i_max if not eclipsing, otherwise i_max=90
-    i_max_rad = np.arccos(requivsumfrac)
-    i_max = np.degrees(i_max_rad)
-    if not (0 < incl < i_max):
+    if eclipsing and not (0 < incl < 90):
         print(f"incl value: {incl}")
         return -np.inf
+    else:
+        i_max_rad = np.arccos(requivsumfrac)
+        i_max = np.degrees(i_max_rad)
+        if not (0 < incl < i_max):
+            print(f"incl value: {incl}")
+            return -np.inf
     if not (0 < np.all(pblums) < 1e6):
         print(f"pblums value: {pblums}")
         return -np.inf

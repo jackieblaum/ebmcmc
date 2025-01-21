@@ -211,7 +211,7 @@ class EBMCMC:
             sampler = emcee.EnsembleSampler(nwalkers, 
                                             ndim, 
                                             lnprob, 
-                                            args=[self.data_dict, q_init, asini_init, period_init, t0_init, ecc, self.rvs], 
+                                            args=[self.data_dict, q_init, asini_init, period_init, t0_init, ecc, self.rvs, self.eclipsing], 
                                             pool=pool,
                                             backend=backend)
 
