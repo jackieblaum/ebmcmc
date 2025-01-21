@@ -36,7 +36,13 @@ class EBMCMC:
     def initialize_bundle(self):
         """Initializes PHOEBE bundle values."""
         self.bundle.set_value_all("ld_mode", "lookup")
+        self.bundle.run_compute(compute='phoebe01', model='latest')
+        pblums = self.bundle.compute_pblums(compute='phoebe01', model='latest')
         self.bundle.set_value_all("pblum_mode", "component-coupled")
+        for dataset in self.bundle.datasets:
+            if not dataset.startswith('rv'):
+                self.bundle.set_value(f'pblum@primary@{dataset}', pblums[f'pblum@primary@{dataset}'].value)
+
 
     def initialize_logging(self):
         """Initializes logging for PHOEBE and pymc."""
