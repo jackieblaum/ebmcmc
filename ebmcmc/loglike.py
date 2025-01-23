@@ -83,6 +83,8 @@ def lnprior(params, q_init, asini_init, period_init, t0_init, ecc_bool, rv_bool,
         i_max_rad = np.arccos(requivsumfrac)
         i_max = np.degrees(i_max_rad)
         if not (0 < incl < i_max):
+            print(f"requivsumfrac: {requivsumfrac}")
+            print(f"i_max: {i_max}")
             print(f"incl value: {incl}")
             return -np.inf
     if not (0 < np.all(pblums) < 1e6):
