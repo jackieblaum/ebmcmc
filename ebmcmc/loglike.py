@@ -100,8 +100,12 @@ def lnprior(params, q_init, asini_init, period_init, t0_init, ecc_bool, rv_bool,
 
     # Gaussian prior on asini
     log_prior_asini = -0.5 * ((asini - asini_init) / (0.1*asini_init))**2
+    log_prior_total = log_prior_q + log_prior_period + log_prior_t0_supconj + log_prior_asini
 
-    return log_prior_incl + log_prior_q + log_prior_period + log_prior_t0_supconj + log_prior_asini
+    if eclipsing:
+        log_prior_total += log_prior_incl
+
+    return log_prior_total
 
 def forward_model(params, data_dict, ecc_bool, rv_bool):
 
