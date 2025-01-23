@@ -76,17 +76,17 @@ def lnprior(params, q_init, asini_init, period_init, t0_init, ecc_bool, rv_bool,
     if not (1e-6 < requiv2 < a):
         print(f"requiv_secondary value: {requiv2}")
         return -np.inf
-    if eclipsing and not (0 < incl < 90):
+    if not (0 < incl < 90):
         print(f"incl value: {incl}")
         return -np.inf
-    else:
-        i_max_rad = np.arccos(requivsumfrac)
-        i_max = np.degrees(i_max_rad)
-        if not (0 < incl < i_max):
-            print(f"requivsumfrac: {requivsumfrac}")
-            print(f"i_max: {i_max}")
-            print(f"incl value: {incl}")
-            return -np.inf
+    # else:
+    #     i_max_rad = np.arccos(requivsumfrac)
+    #     i_max = np.degrees(i_max_rad)
+    #     if not (0 < incl < i_max):
+    #         print(f"requivsumfrac: {requivsumfrac}")
+    #         print(f"i_max: {i_max}")
+    #         print(f"incl value: {incl}")
+    #         return -np.inf
     if not (0 < np.all(pblums) < 1e6):
         print(f"pblums value: {pblums}")
         return -np.inf
