@@ -15,6 +15,7 @@ def lnprob(params, data_dict, q_init, asini_init, period_init, t0_init, ecc_bool
     Returns:
         float: The combined log-probability.
     """
+    print(f"lnprob called with {params}")
     lp = lnprior(params, q_init, asini_init, period_init, t0_init, ecc_bool, rv_bool, eclipsing)
     if not np.isfinite(lp):
         return -np.inf

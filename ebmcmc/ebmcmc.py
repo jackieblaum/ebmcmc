@@ -214,6 +214,7 @@ class EBMCMC:
 
         # Create the emcee sampler
         with Pool(processes=threads) as pool:
+            print("Getting sampler...")
             sampler = emcee.EnsembleSampler(nwalkers, 
                                             ndim, 
                                             lnprob, 
