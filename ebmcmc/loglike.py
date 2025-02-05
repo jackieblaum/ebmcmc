@@ -1,6 +1,8 @@
 import phoebe
 import numpy as np
 import binarysed
+import sys
+import time
 
 def lnprob(params, data_dict, q_init, asini_init, period_init, t0_init, ecc_bool, rv_bool, eclipsing):
     """
@@ -15,11 +17,21 @@ def lnprob(params, data_dict, q_init, asini_init, period_init, t0_init, ecc_bool
     Returns:
         float: The combined log-probability.
     """
+    start_time = time.time()
     print(f"lnprob called with {params}")
-    lp = lnprior(params, q_init, asini_init, period_init, t0_init, ecc_bool, rv_bool, eclipsing)
-    if not np.isfinite(lp):
+    sys.stdout.flush()
+    try:
+        lp = lnprior(params, q_init, asini_init, period_init, t0_init, ecc_bool, rv_bool, eclipsing)
+        if not np.isfinite(lp):
+            raise ValueError(f'log prior not finite: {lp}')
+        elapsed_time = time.time() - start_time
+        print(f"lnprob completed in {elapsed_time:.5f} seconds: lp={lp}")
+        sys.stdout.flush()
+        return lp + lnlikelihood(params, data_dict, ecc_bool, rv_bool)
+    except Exception as e:
+        print(f"lnprob failed: {e}")
+        sys.stdout.flush()
         return -np.inf
-    return lp + lnlikelihood(params, data_dict, ecc_bool, rv_bool)
 
 def lnprior(params, q_init, asini_init, period_init, t0_init, ecc_bool, rv_bool, eclipsing):
     """
@@ -261,8 +273,11 @@ def lnlikelihood(params, data_dict, ecc_bool, rv_bool):
     """
 
     try:
+        print('Calculating likelihood...')
+        sys.stdout.flush()
         y_pred_lc, y_pred_rv_primary, y_pred_rv_secondary, sed_model = forward_model(params, data_dict, ecc_bool, rv_bool)   
         print('Successful computation.')
+        sys.stdout.flush()
     except ValueError as e:
         print("Catching exception.")
         print(e)

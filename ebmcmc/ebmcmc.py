@@ -1,6 +1,7 @@
 import phoebe
 import numpy as np
 import os
+import sys
 import scipy.optimize
 import matplotlib.pyplot as plt
 import emcee
@@ -10,6 +11,7 @@ from tqdm import tqdm
 import binarysed
 from ebmcmc.loglike import lnprob
 from multiprocessing import Pool
+from joblib import Parallel, delayed
 
 class EBMCMC:
     """
@@ -173,9 +175,18 @@ class EBMCMC:
         if initial_guess is None:
             raise ValueError("Initial values for parameters cannot be found.")
         
+        q_init = initial_guess[0]
+        Msum_init = initial_guess[1]
+        period_init = initial_guess[2]
+        t0_init = initial_guess[3]
+        incl_init = initial_guess[8]
         # scales = [0.02, 0.2, 0.01, 0.02, 
         #         0.01, 0.0002, 0.2, 20, 0.1, 1]
-        scales = [0.01, 0.1, 0.001, 0.0002, 200, 200, 0.02, 0.02, 0.2]
+        if q_init > 0.99:
+            q_scale = 0.001
+        else:
+            q_scale = 0.01
+        scales = [q_scale, 0.1, 0.001, 0.0002, 200, 200, 0.02, 0.02, 0.2]
         vgamma_scale = 10
         ecc_scale = 0.01
         per0_scale = 1
@@ -187,11 +198,6 @@ class EBMCMC:
         for _ in range(len(initial_guess) - len(scales)):
             scales.append(0.05)
         scales = np.array(scales)
-        q_init = initial_guess[0]
-        Msum_init = initial_guess[1]
-        period_init = initial_guess[2]
-        t0_init = initial_guess[3]
-        incl_init = initial_guess[8]
 
         G = 6.67430e-8            # Gravitational constant in cgs units
         a_init = (G * Msum_init * (period_init * 86400)**2 / (4 * np.pi**2))**(1/3)  # Semi-major axis in cm
@@ -234,6 +240,8 @@ class EBMCMC:
             # Run sampling up to `max_n` steps with periodic convergence checks
             for sample in sampler.sample(p0, iterations=max_n, progress=True, thin=thin):
                 # Skip initial burn-in period
+                print('Sample fetched.')
+                sys.stdout.flush()
                 if sampler.iteration < burn_in:
                     continue
                 
@@ -258,10 +266,10 @@ class EBMCMC:
                     old_tau = tau  # Update old_tau for next comparison
 
             print("Sampling completed.")
+            sys.stdout.flush()
 
         # Save the trace
         # self.save_trace(sampler)
-
         return sampler
     
     def set_run_dir(self, prev_run_dir):
