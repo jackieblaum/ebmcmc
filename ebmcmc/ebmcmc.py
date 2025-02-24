@@ -38,6 +38,7 @@ class EBMCMC:
     def initialize_bundle(self):
         """Initializes PHOEBE bundle values."""
         self.bundle.set_value_all("ld_mode", "lookup")
+        self.bundle.set_value("eclipse_method", value="native")
         self.bundle.run_compute(compute='phoebe01', model='latest')
         pblums = self.bundle.compute_pblums(compute='phoebe01', model='latest')
         self.bundle.set_value_all("pblum_mode", "component-coupled")
@@ -47,10 +48,11 @@ class EBMCMC:
 
 
     def initialize_logging(self):
-        """Initializes logging for PHOEBE and pymc."""
-        phoebe_logger = phoebe.logger(
-            clevel=None, flevel="CRITICAL", filename="phoebe.log"
-        )
+        """Initializes logging for PHOEBE."""
+        # phoebe_logger = phoebe.logger(
+        #     clevel=None, flevel="CRITICAL", filename="phoebe.log"
+        # )
+        phoebe_logger = phoebe.logger(clevel="INFO", flevel="DEBUG", filename="phoebe.log")
         phoebe_logger.propagate = False
         phoebe.progressbars_off()
         logging.getLogger().setLevel(logging.INFO)
@@ -167,8 +169,11 @@ class EBMCMC:
         return init_vals
 
 
-    def sample(self, ecc=True, nwalkers=32, nsteps=5000, threads=16):
+    def sample(self, ecc=True, nwalkers=32, nsteps=5000, threads=16, use_ellc=False):
         """Runs MCMC sampling using emcee."""
+
+        if not use_ellc:
+            phoebe.multiprocessing_set_nprocs(threads)
 
         initial_guess = self.get_initial_values(ecc)
         # print(initial_guess)
@@ -218,58 +223,71 @@ class EBMCMC:
             ndim = backend.get_chain().shape[2]
             p0 = backend.get_chain()[-1]
 
-        # Create the emcee sampler
+        # # Create the emcee sampler
+        # if not use_ellc:
+        #     sampler = self.run_sampler(nwalkers, ndim, backend, p0, q_init, 
+        #                                asini_init, period_init, t0_init, ecc,
+        #                                use_ellc=use_ellc)
+        # else:
         with Pool(processes=threads) as pool:
-            print("Getting sampler...")
-            sampler = emcee.EnsembleSampler(nwalkers, 
-                                            ndim, 
-                                            lnprob, 
-                                            args=[self.data_dict, q_init, asini_init, period_init, t0_init, ecc, self.rvs, self.eclipsing], 
-                                            pool=pool,
-                                            backend=backend)
+            sampler = self.run_sampler(nwalkers, ndim, backend, p0, q_init, 
+                                        asini_init, period_init, t0_init, ecc, 
+                                        use_ellc=use_ellc, pool=pool)
 
-            print("Running sampling with convergence checks...")
-
-            max_n = 100000  # Maximum number of steps
-            thin = 1       # Keep every 10th sample to reduce autocorrelation (adjust as needed)
-            burn_in = 2000  # Number of samples to discard as burn-in
-            index = 0       # To track the number of autocorrelation checks
-            autocorr = np.empty(max_n // (100 * thin))  # Adjusted for thinning
-            old_tau = np.inf  # Previous autocorrelation time for comparison
-
-            # Run sampling up to `max_n` steps with periodic convergence checks
-            for sample in sampler.sample(p0, iterations=max_n, progress=True, thin=thin):
-                # Skip initial burn-in period
-                print('Sample fetched.')
-                sys.stdout.flush()
-                if sampler.iteration < burn_in:
-                    continue
-                
-                # Check convergence every 50 * thin steps
-                if sampler.iteration % (50 * thin) == 0:
-                    # Compute the autocorrelation time
-                    try:
-                        tau = sampler.get_autocorr_time(tol=0)
-                    except emcee.autocorr.AutocorrError:
-                        print("Autocorrelation time could not be estimated reliably.")
-                        continue
-
-                    autocorr[index] = np.mean(tau)  # Track average autocorrelation time
-                    index += 1
-
-                    # Check convergence criteria
-                    converged = np.all(tau * 50 < sampler.iteration)
-                    converged &= np.all(np.abs(old_tau - tau) / tau < 0.01)
-                    if converged:
-                        print("Convergence reached.")
-                        break
-                    old_tau = tau  # Update old_tau for next comparison
-
-            print("Sampling completed.")
-            sys.stdout.flush()
+        print("Sampling completed.")
+        sys.stdout.flush()
 
         # Save the trace
         # self.save_trace(sampler)
+        return sampler
+    
+    def run_sampler(self, nwalkers, ndim, backend, p0, q_init, asini_init, period_init, t0_init, ecc, use_ellc=False, pool=None):
+        print("Getting sampler...")
+        sys.stdout.flush()
+        sampler = emcee.EnsembleSampler(nwalkers, 
+                                        ndim, 
+                                        lnprob, 
+                                        args=[self.data_dict, q_init, asini_init, period_init, t0_init, ecc, self.rvs, self.eclipsing, use_ellc], 
+                                        pool=pool,
+                                        backend=backend)
+
+        print("Running sampling with convergence checks...")
+
+        max_n = 100000  # Maximum number of steps
+        thin = 1       # Keep every 10th sample to reduce autocorrelation (adjust as needed)
+        burn_in = 2000  # Number of samples to discard as burn-in
+        index = 0       # To track the number of autocorrelation checks
+        autocorr = np.empty(max_n // (100 * thin))  # Adjusted for thinning
+        old_tau = np.inf  # Previous autocorrelation time for comparison
+
+        # Run sampling up to `max_n` steps with periodic convergence checks
+        for sample in sampler.sample(p0, iterations=max_n, progress=True, thin=thin):
+            # Skip initial burn-in period
+            print('Sample fetched.')
+            sys.stdout.flush()
+            if sampler.iteration < burn_in:
+                continue
+            
+            # Check convergence every 50 * thin steps
+            if sampler.iteration % (50 * thin) == 0:
+                # Compute the autocorrelation time
+                try:
+                    tau = sampler.get_autocorr_time(tol=0)
+                except emcee.autocorr.AutocorrError:
+                    print("Autocorrelation time could not be estimated reliably.")
+                    continue
+
+                autocorr[index] = np.mean(tau)  # Track average autocorrelation time
+                index += 1
+
+                # Check convergence criteria
+                converged = np.all(tau * 50 < sampler.iteration)
+                converged &= np.all(np.abs(old_tau - tau) / tau < 0.01)
+                if converged:
+                    print("Convergence reached.")
+                    break
+                old_tau = tau  # Update old_tau for next comparison
+
         return sampler
     
     def set_run_dir(self, prev_run_dir):
