@@ -363,13 +363,15 @@ def lnlikelihood(params, data_dict, ecc_bool, rv_bool, use_ellc):
     # Calculate chi-squared for SED, if provided
     chi2_sed = 0
     sed_params = 6 # teff1, teff2, r1, r2, logg1, logg2
+    N_sed_points = 0
     if sed_model is not None:
         obs_fluxes = data_dict["sed"]["fluxes"]
         obs_flux_errs = data_dict["sed"]["flux_errs"]
 
         chi2_sed = np.sum((obs_fluxes - sed_model) ** 2 / obs_flux_errs**2)
+        N_sed_points = len(obs_fluxes)
 
     # Return the total log-likelihood
-    print(f"Reduced Chi2: LC - {chi2_lc/(N_lc_points - lc_params)}, RV - {chi2_rv/(N_rv_points - rv_params)}, SED - {chi2_sed(len(obs_fluxes) - sed_params)}")
-    chi2 = chi2_lc/(N_lc_points - lc_params) + chi2_rv/(N_rv_points - rv_params) + chi2_sed/(len(obs_fluxes) - sed_params)
+    print(f"Reduced Chi2: LC - {chi2_lc/(N_lc_points - lc_params)}, RV - {chi2_rv/(N_rv_points - rv_params)}, SED - {chi2_sed/(N_sed_points - sed_params)}")
+    chi2 = chi2_lc/(N_lc_points - lc_params) + chi2_rv/(N_rv_points - rv_params) + chi2_sed/(N_sed_points - sed_params)
     return -0.5 * chi2
