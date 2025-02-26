@@ -169,7 +169,8 @@ class EBMCMC:
         return init_vals
 
 
-    def sample(self, ecc=True, nwalkers=32, nsteps=5000, threads=16, use_ellc=False):
+    def sample(self, ecc=True, nwalkers=32, nsteps=5000, threads=16, use_ellc=False,
+               lc_coeff=1, rv_coeff=1, sed_coeff=1):
         """Runs MCMC sampling using emcee."""
 
         if not use_ellc:
@@ -232,7 +233,9 @@ class EBMCMC:
         with Pool(processes=threads) as pool:
             sampler = self.run_sampler(nwalkers, ndim, backend, p0, q_init, 
                                         asini_init, period_init, t0_init, ecc, 
-                                        use_ellc=use_ellc, pool=pool)
+                                        use_ellc=use_ellc, pool=pool,
+                                        lc_coeff=lc_coeff, rv_coeff=rv_coeff, 
+                                        sed_coeff=sed_coeff)
 
         print("Sampling completed.")
         sys.stdout.flush()
@@ -241,13 +244,16 @@ class EBMCMC:
         # self.save_trace(sampler)
         return sampler
     
-    def run_sampler(self, nwalkers, ndim, backend, p0, q_init, asini_init, period_init, t0_init, ecc, use_ellc=False, pool=None):
+    def run_sampler(self, nwalkers, ndim, backend, p0, q_init, asini_init, period_init, 
+                    t0_init, ecc, use_ellc=False, pool=None, lc_coeff=1, rv_coeff=1, sed_coeff=1):
         print("Getting sampler...")
         sys.stdout.flush()
         sampler = emcee.EnsembleSampler(nwalkers, 
                                         ndim, 
                                         lnprob, 
-                                        args=[self.data_dict, q_init, asini_init, period_init, t0_init, ecc, self.rvs, self.eclipsing, use_ellc], 
+                                        args=[self.data_dict, q_init, asini_init, 
+                                              period_init, t0_init, ecc, self.rvs, self.eclipsing, 
+                                              use_ellc, lc_coeff, rv_coeff, sed_coeff], 
                                         pool=pool,
                                         backend=backend)
 

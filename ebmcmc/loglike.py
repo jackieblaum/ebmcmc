@@ -6,7 +6,8 @@ import time
 import logging
 from scipy.interpolate import interp1d
 
-def lnprob(params, data_dict, q_init, asini_init, period_init, t0_init, ecc_bool, rv_bool, eclipsing, use_ellc):
+def lnprob(params, data_dict, q_init, asini_init, period_init, t0_init, ecc_bool, rv_bool, eclipsing, use_ellc,
+           lc_coeff, rv_coeff, sed_coeff):
     """
     Computes the log-probability by combining the log-prior and the log-likelihood.
     
@@ -29,7 +30,8 @@ def lnprob(params, data_dict, q_init, asini_init, period_init, t0_init, ecc_bool
         elapsed_time = time.time() - start_time
         print(f"lnprob completed in {elapsed_time:.5f} seconds: lp={lp}")
         sys.stdout.flush()
-        return lp + lnlikelihood(params, data_dict, ecc_bool, rv_bool, use_ellc)
+        return lp + lnlikelihood(params, data_dict, ecc_bool, rv_bool, use_ellc, 
+                                 lc_coeff=lc_coeff, rv_coeff=rv_coeff, sed_coeff=sed_coeff)
     except Exception as e:
         print(f"lnprob failed: {e}")
         sys.stdout.flush()
