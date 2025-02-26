@@ -307,7 +307,8 @@ def forward_model(params, data_dict, ecc_bool, rv_bool, use_ellc):
     return y_pred_lc, y_pred_rv_primary, y_pred_rv_secondary, sed_model
 
 
-def lnlikelihood(params, data_dict, ecc_bool, rv_bool, use_ellc):
+def lnlikelihood(params, data_dict, ecc_bool, rv_bool, use_ellc, 
+                 lc_coeff=1, rv_coeff=1, sed_coeff=1):
     """
     Computes the log-likelihood for the given model parameters and observed data.
 
@@ -373,5 +374,8 @@ def lnlikelihood(params, data_dict, ecc_bool, rv_bool, use_ellc):
 
     # Return the total log-likelihood
     print(f"Reduced Chi2: LC - {chi2_lc/(N_lc_points - lc_params)}, RV - {chi2_rv/(N_rv_points - rv_params)}, SED - {chi2_sed/(N_sed_points - sed_params)}")
-    chi2 = chi2_lc/(N_lc_points - lc_params) + chi2_rv/(N_rv_points - rv_params) + chi2_sed/(N_sed_points - sed_params)
+    reduced_chi2_lc = chi2_lc/(N_lc_points - lc_params)
+    reduced_chi2_rv = chi2_rv/(N_rv_points - rv_params)
+    reduced_chi2_sed = chi2_sed/(N_sed_points - sed_params)
+    chi2 = lc_coeff * reduced_chi2_lc + rv_coeff * reduced_chi2_rv + sed_coeff * reduced_chi2_sed
     return -0.5 * chi2
