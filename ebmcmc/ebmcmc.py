@@ -232,7 +232,7 @@ class EBMCMC:
         # else:
         with Pool(processes=threads) as pool:
             sampler = self.run_sampler(nwalkers, ndim, backend, p0, q_init, 
-                                        asini_init, period_init, t0_init, ecc, 
+                                        asini_init, period_init, Msum_init, t0_init, ecc, 
                                         use_ellc=use_ellc, pool=pool,
                                         lc_coeff=lc_coeff, rv_coeff=rv_coeff, 
                                         sed_coeff=sed_coeff)
@@ -244,7 +244,7 @@ class EBMCMC:
         # self.save_trace(sampler)
         return sampler
     
-    def run_sampler(self, nwalkers, ndim, backend, p0, q_init, asini_init, period_init, 
+    def run_sampler(self, nwalkers, ndim, backend, p0, q_init, asini_init, period_init, Msum_init,
                     t0_init, ecc, use_ellc=False, pool=None, lc_coeff=1, rv_coeff=1, sed_coeff=1):
         print("Getting sampler...")
         sys.stdout.flush()
@@ -252,7 +252,7 @@ class EBMCMC:
                                         ndim, 
                                         lnprob, 
                                         args=[self.data_dict, q_init, asini_init, 
-                                              period_init, t0_init, ecc, self.rvs, self.eclipsing, 
+                                              period_init, Msum_init, t0_init, ecc, self.rvs, self.eclipsing, 
                                               use_ellc, lc_coeff, rv_coeff, sed_coeff], 
                                         pool=pool,
                                         backend=backend)

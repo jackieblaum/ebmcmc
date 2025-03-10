@@ -6,7 +6,7 @@ import time
 import logging
 from scipy.interpolate import interp1d
 
-def lnprob(params, data_dict, q_init, asini_init, period_init, t0_init, ecc_bool, rv_bool, eclipsing, use_ellc,
+def lnprob(params, data_dict, q_init, asini_init, period_init, Msum_init, t0_init, ecc_bool, rv_bool, eclipsing, use_ellc,
            lc_coeff, rv_coeff, sed_coeff):
     """
     Computes the log-probability by combining the log-prior and the log-likelihood.
@@ -24,7 +24,7 @@ def lnprob(params, data_dict, q_init, asini_init, period_init, t0_init, ecc_bool
     print(f"lnprob called with {params}")
     sys.stdout.flush()
     try:
-        lp = lnprior(params, q_init, asini_init, period_init, t0_init, ecc_bool, rv_bool, eclipsing)
+        lp = lnprior(params, q_init, asini_init, period_init, Msum_init, t0_init, ecc_bool, rv_bool, eclipsing)
         if not np.isfinite(lp):
             raise ValueError(f'log prior not finite: {lp}')
         elapsed_time = time.time() - start_time
@@ -37,7 +37,7 @@ def lnprob(params, data_dict, q_init, asini_init, period_init, t0_init, ecc_bool
         sys.stdout.flush()
         return -np.inf
 
-def lnprior(params, q_init, asini_init, period_init, t0_init, ecc_bool, rv_bool, eclipsing):
+def lnprior(params, q_init, asini_init, period_init, Msum_init, t0_init, ecc_bool, rv_bool, eclipsing):
     """
     Defines the log-prior function for the parameters.
     
@@ -113,9 +113,10 @@ def lnprior(params, q_init, asini_init, period_init, t0_init, ecc_bool, rv_bool,
         log_prior_incl = np.log(np.sin(np.radians(incl)))  # sin(i) prior for random orientation
 
     # Uniform priors return 0 (log(1)); if Gaussian, use -0.5 * ((param - mu)/sigma)**2
-    log_prior_q = -0.5 * ((q - q_init) / (q_init * 0.01))**2  # Gaussian prior with mean q_init and std dev 0.01 * q_init
+    log_prior_q = -0.5 * ((q - q_init) / (q_init * 0.05))**2  # Gaussian prior with mean q_init and std dev 0.01 * q_init
     log_prior_period = -0.5 * ((period - period_init) / (0.0001 * period_init))**2
     log_prior_t0_supconj = -0.5 * ((t0_supconj - t0_init) / (0.01 * period_init))**2
+    log_prior_msum = -0.5 * ((Msum - Msum_init) / (0.05 * Msum_init))**2
 
     # Gaussian prior on asini
     log_prior_asini = -0.5 * ((asini - asini_init) / (0.1*asini_init))**2
@@ -375,9 +376,19 @@ def lnlikelihood(params, data_dict, ecc_bool, rv_bool, use_ellc,
         N_sed_points = len(obs_fluxes)
 
     # Return the total log-likelihood
-    print(f"Reduced Chi2: LC - {chi2_lc/(N_lc_points - lc_params)}, RV - {chi2_rv/(N_rv_points - rv_params)}, SED - {chi2_sed/(N_sed_points - sed_params)}")
-    reduced_chi2_lc = chi2_lc/(N_lc_points - lc_params)
-    reduced_chi2_rv = chi2_rv/(N_rv_points - rv_params)
-    reduced_chi2_sed = chi2_sed/(N_sed_points - sed_params)
-    chi2 = lc_coeff * reduced_chi2_lc + rv_coeff * reduced_chi2_rv + sed_coeff * reduced_chi2_sed
+    w_LC = 0
+    w_SED = 0
+    w_RV = 0
+    if N_lc_points is not 0:
+        w_LC = (N_sed_points + N_rv_points) / N_lc_points
+    if N_sed_points is not 0:
+        w_SED = (N_lc_points + N_rv_points) / N_sed_points
+    if N_rv_points is not 0:
+        w_RV = (N_lc_points + N_sed_points) / N_rv_points
+    print(f"Reduced Chi2: LC - {chi2_lc * w_LC}, RV - {chi2_rv * w_RV}, SED - {chi2_sed * w_SED}")
+    # reduced_chi2_lc = chi2_lc/(N_lc_points - lc_params)
+    # reduced_chi2_rv = chi2_rv/(N_rv_points - rv_params)
+    # reduced_chi2_sed = chi2_sed/(N_sed_points - sed_params)
+    # chi2 = lc_coeff * reduced_chi2_lc + rv_coeff * reduced_chi2_rv + sed_coeff * reduced_chi2_sed
+    chi2 = w_LC * chi2_lc + w_RV * chi2_rv + w_SED * chi2_sed
     return -0.5 * chi2
