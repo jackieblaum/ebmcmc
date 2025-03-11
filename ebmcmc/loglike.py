@@ -66,10 +66,24 @@ def lnprior(params, q_init, asini_init, period_init, Msum_init, t0_init, ecc_boo
     else:
         pblums = params[9:]
 
-    G = 6.67430e-8            # Gravitational constant in cgs units
-    a = (G * Msum * (period * 86400)**2 / (4 * np.pi**2))**(1/3)  # Semi-major axis in cm
-    requivsumfrac = (requiv1 + requiv2)/a
+    G = 2942.206217504419328179210424423218 # Gravitational constant in solar units
+    R_sun = 695700 # km
+
+    a = (Msum * period**2 * G / (4 * np.pi**2))**(1/3)  # Semi-major axis in solar radii
+    a1 = a / (1/q + 1)
+    M1 = Msum/(1+q)
+    M2 = M1*q
     asini = a * np.sin(np.radians(incl))
+    K1 = 2 * np.pi * a1 * R_sun * np.sin(np.radians(incl)) / (period * 3600 * 24)
+    K2 = K1 * M1 / M2
+
+    a_init = (Msum_init * period_init**2 * G / (4 * np.pi**2))**(1/3)
+    M1_init = Msum_init/(1+q_init)
+    M2_init = M1_init*q_init
+    a1_init = a_init / (1/q_init + 1)
+    incl_init = asini_init / a_init
+    K1_init = 2 * np.pi * a1_init * R_sun * np.sin(np.radians(incl_init)) / (period_init*3600*24)
+    K2_init = K1_init * M1_init / M2_init
 
     # Check priors
     if not (0 < q <= 1):
@@ -113,13 +127,14 @@ def lnprior(params, q_init, asini_init, period_init, Msum_init, t0_init, ecc_boo
         log_prior_incl = np.log(np.sin(np.radians(incl)))  # sin(i) prior for random orientation
 
     # Uniform priors return 0 (log(1)); if Gaussian, use -0.5 * ((param - mu)/sigma)**2
-    log_prior_q = -0.5 * ((q - q_init) / (q_init * 0.05))**2  # Gaussian prior with mean q_init and std dev 0.01 * q_init
+    log_prior_q = -0.5 * ((q - q_init) / (q_init * 0.02))**2  # Gaussian prior with mean q_init and std dev 0.01 * q_init
     log_prior_period = -0.5 * ((period - period_init) / (0.0001 * period_init))**2
     log_prior_t0_supconj = -0.5 * ((t0_supconj - t0_init) / (0.01 * period_init))**2
-    log_prior_msum = -0.5 * ((Msum - Msum_init) / (0.05 * Msum_init))**2
+    # log_prior_K1 = -0.5 * ((K1 - K1_init) / (0.05 * K1_init))**2
+    # log_prior_K2 = -0.5 * ((K2 - K2_init) / (0.05 * K2_init))**2
 
     # Gaussian prior on asini
-    log_prior_asini = -0.5 * ((asini - asini_init) / (0.1*asini_init))**2
+    log_prior_asini = -0.5 * ((asini - asini_init) / (0.02*asini_init))**2
     log_prior_total = log_prior_q + log_prior_period + log_prior_t0_supconj + log_prior_asini
 
     if eclipsing:
