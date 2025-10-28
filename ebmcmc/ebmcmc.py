@@ -10,6 +10,7 @@ import logging
 from tqdm import tqdm
 import binarysed
 from ebmcmc.loglike import lnprob
+from emcee.moves import StretchMove, DEMove, KDEMove, GaussianMove
 from multiprocessing import Pool
 from joblib import Parallel, delayed
 
@@ -19,21 +20,25 @@ class EBMCMC:
     """
 
     def __init__(
-        self, bundle, trace_dir=None, sed=None, datasets=None, eclipsing=True, ecc=True, prev_run_dir=None
+        self, bundle, trace_dir=None, sed=None, datasets=None, eclipsing=True, ecc=True, prev_run_dir=None, new_run_dir=None
     ):
         self.bundle = bundle
         self.sed = sed
         self.min_time = 1e9
         self.max_time = 0
         self.rvs = False
+        self.compute_phases = None
         self.data_dict = self.create_data_dict(datasets=datasets)
         self.eclipsing = eclipsing
         self.ecc = ecc
         self.trace_dir = trace_dir
+        self.C = 0
+        self.period = None
+        self.t0 = 0
 
         self.initialize_bundle()
         self.initialize_logging()
-        self.set_run_dir(prev_run_dir)
+        self.set_run_dir(prev_run_dir, new_run_dir)
 
     def initialize_bundle(self):
         """Initializes PHOEBE bundle values."""
@@ -43,19 +48,21 @@ class EBMCMC:
         pblums = self.bundle.compute_pblums(compute='phoebe01', model='latest')
         self.bundle.set_value_all("pblum_mode", "component-coupled")
         for dataset in self.bundle.datasets:
-            if not dataset.startswith('rv'):
+            if not dataset.startswith('rv') and self.bundle[f'{dataset}@dataset@mask_enabled'].value:
                 self.bundle.set_value(f'pblum@primary@{dataset}', pblums[f'pblum@primary@{dataset}'].value)
-
+                times = self.bundle.get_value(f"times@{dataset}@dataset")
+                if not dataset.endswith('unbinned') and len(times)==200:
+                    self.compute_phases = self.bundle.to_phase(times)
 
     def initialize_logging(self):
         """Initializes logging for PHOEBE."""
         # phoebe_logger = phoebe.logger(
         #     clevel=None, flevel="CRITICAL", filename="phoebe.log"
         # )
-        phoebe_logger = phoebe.logger(clevel="INFO", flevel="DEBUG", filename="phoebe.log")
+        phoebe_logger = phoebe.logger(clevel="WARNING", flevel="DEBUG", filename="phoebe.log")
         phoebe_logger.propagate = False
         phoebe.progressbars_off()
-        logging.getLogger().setLevel(logging.INFO)
+        logging.getLogger().setLevel(logging.WARNING)
 
     def create_data_dict(self, datasets=None):
         data_dict = {}
@@ -78,13 +85,15 @@ class EBMCMC:
 
     def extract_light_curve_data(self, dataset):
         times = self.bundle.get_value(f"times@{dataset}@dataset")
-        self.min_time, self.max_time = min(self.min_time, np.min(times)), max(
-            self.max_time, np.max(times)
-        )
+        phases = self.bundle.to_phase(times)  # ← precompute once
+        self.min_time = min(self.min_time, np.min(times))
+        self.max_time = max(self.max_time, np.max(times))
         return {
-            "data": self.bundle.get_value(f"fluxes@{dataset}@dataset"),
+            "data":   self.bundle.get_value(f"fluxes@{dataset}@dataset"),
             "sigmas": self.bundle.get_value(f"sigmas@{dataset}"),
-            "times": times,
+            "times":  times,
+            "phases": phases,                      # ← keep here
+            "passband": self.bundle.get_value(f"passband@{dataset}")  # optional, handy
         }
 
     def extract_rv_data(self, dataset):
@@ -99,21 +108,33 @@ class EBMCMC:
             "secondary_times": secondary_times,
         }
 
+    def logit(self, p):   
+        p = np.clip(p, 1e-9, 1-1e-9)
+        return np.log(p) - np.log1p(-p)
+
+    def sigmoid(self, z): 
+        return 1/(1+np.exp(-z))
+
+    def softplus_inv(self, y):                # y > 0
+        return np.log(np.expm1(y))
+
     def get_initial_values(self, ecc):
-        period_init = self.bundle.get_value("period@binary@component")
+        self.period = self.bundle.get_value("period@binary@component")
+        self.t0 = self.bundle.get_value("t0_supconj@binary@component")
         m1 = self.bundle.get_value("mass@primary@component")
         m2 = self.bundle.get_value("mass@secondary@component")
         Msum_init = m1 + m2
         q_init = self.bundle.get_value("q@binary@component")
         incl_init = self.bundle.get_value("incl@binary@component")
         # asini_init = self.bundle.get_value("asini@binary@component")
-        # requivsumfrac_init = self.bundle.get_value("requivsumfrac@binary@component")
+        rsumfrac_init = self.bundle.get_value("requivsumfrac@binary@component")
         t0_supconj_init = self.bundle.get_value('t0_supconj@binary@component')
-        pblums_init = [
-            self.bundle.get_value(f"pblum@primary@{dataset}@dataset")
-            for dataset in self.bundle.datasets
-            if dataset.startswith("lc")
-        ]
+        # pblums_init = [
+        #     self.bundle.get_value(f"pblum@primary@{dataset}@dataset")
+        #     for dataset in self.bundle.datasets
+        #     if dataset.startswith("lc") and self.bundle[f'{dataset}@dataset@mask_enabled'].value
+        # ]
+        dist_init = self.sed["dist"]
 
         if q_init > 1:
             q_init = m1 / m2
@@ -130,12 +151,30 @@ class EBMCMC:
         if 90 < incl_init < 180:
             incl_init = 180 - incl_init
 
-        # init_vals = [teffratio_init, incl_init, requivsumfrac_init, requiv_secondary_init, 
-        #         q_init, t0_supconj_init, asini_init, teff_secondary_init, period_init, 
-        #         ]
-        init_vals = [q_init, Msum_init, period_init, t0_supconj_init, teff1_init, 
-                     teff2_init, requiv1_init, requiv2_init, incl_init
-                ]
+        incl_rad = np.deg2rad(incl_init)
+        cosi_init = np.clip(np.cos(incl_rad), 0.0, 1.0)
+        first_lc = next(ds for ds in self.data_dict if ds.startswith("lc"))
+        sigma_floor = max(3e-4, 0.5*np.nanmedian(self.data_dict[first_lc]["sigmas"]))
+        alpha_floor = 0.03
+
+        eta_sigma_lc_init  = self.softplus_inv(0.3*sigma_floor)
+        eta_alpha_sed_init = self.softplus_inv(0.3*alpha_floor)
+
+        logit_cosi_init = self.logit(cosi_init)
+        logit_q_init = self.logit(q_init)
+        log_Msum_init = np.log(Msum_init)
+        log_rfrac_init = np.log(requiv2_init/requiv1_init)
+        logit_rsumfrac_init = self.logit(rsumfrac_init)
+        log_teff1_init = np.log(teff1_init)
+        log_tefffrac_init = np.log(teff2_init/teff1_init)
+        log_dist_init = np.log(dist_init)
+
+        # self.C = log_Msum_init - 3 * log_requiv1_init
+        ridge_scale_init = 0
+
+        init_vals = [logit_q_init, log_Msum_init, log_teff1_init,
+                    log_tefffrac_init, log_rfrac_init, logit_rsumfrac_init, logit_cosi_init,
+                    log_dist_init, eta_alpha_sed_init, eta_sigma_lc_init]
 
         if self.rvs:
             vgamma_init = self.bundle.get_value('vgamma@system')
@@ -143,11 +182,15 @@ class EBMCMC:
         if ecc:
             ecc_init = self.bundle.get_value("ecc@binary@component")
             per0_init = self.bundle.get_value("per0@binary@component")
-            init_vals.append(ecc_init)
-            init_vals.append(per0_init)
+            per0_rad = np.deg2rad(per0_init)
+            # se = np.sqrt(max(e, 0.0))
+            # xe = se * np.cos(per0_rad)
+            # ye = se * np.sin(per0_rad)
+            # init_vals.append(xe)
+            # init_vals.append(ye)
     
-        for pblum in pblums_init:
-            init_vals.append(pblum)
+        # for pblum in pblums_init:
+        #     init_vals.append(pblum)
 
         # print("Initial Values:")
         # print("teffratio:", init_vals[0])
@@ -170,7 +213,7 @@ class EBMCMC:
 
 
     def sample(self, ecc=True, nwalkers=32, nsteps=5000, threads=16, use_ellc=False,
-               lc_coeff=1, rv_coeff=1, sed_coeff=1):
+               lc_coeff=1, rv_coeff=1, sed_coeff=1, p0=None):
         """Runs MCMC sampling using emcee."""
 
         if not use_ellc:
@@ -181,18 +224,38 @@ class EBMCMC:
         if initial_guess is None:
             raise ValueError("Initial values for parameters cannot be found.")
         
-        q_init = initial_guess[0]
-        Msum_init = initial_guess[1]
-        period_init = initial_guess[2]
-        t0_init = initial_guess[3]
-        incl_init = initial_guess[8]
+        logit_q_init = initial_guess[0]
+        log_Msum_init = initial_guess[1]
+        log_teff1_init = initial_guess[2]
+        log_tefffrac_init = initial_guess[3]
+        log_rfrac_init = initial_guess[4]
+        logit_rsumfrac_init = initial_guess[5]
+        logit_cosi_init = initial_guess[6]
+        log_dist_init = initial_guess[7]
+        alpha_sed = initial_guess[8]
+        sigma_lc = initial_guess[9]
+        
         # scales = [0.02, 0.2, 0.01, 0.02, 
         #         0.01, 0.0002, 0.2, 20, 0.1, 1]
+        cosi_init = self.sigmoid(logit_cosi_init)
+        incl_init = np.degrees(np.arccos(cosi_init))
+        q_init = self.sigmoid(logit_q_init)
         if q_init > 0.99:
-            q_scale = 0.001
+            logit_q_scale = 0.001
         else:
-            q_scale = 0.01
-        scales = [q_scale, 0.1, 0.001, 0.0002, 200, 200, 0.02, 0.02, 0.2]
+            logit_q_scale = 0.01
+
+        log_requiv_scale = 0.02 / np.log(10)
+        # scales = [log_q_scale, 
+        #           0.01, 
+        #           0.0005, 
+        #           0.0002, 
+        #           200, 
+        #           200, 
+        #           log_requiv_scale, 
+        #           log_requiv_scale, 
+        #           0.2]
+        scales = [0.15, 0.1, 0.02, 0.02, 0.1, 0.1, 0.12, 0.05, 0.25, 0.2]
         vgamma_scale = 10
         ecc_scale = 0.01
         per0_scale = 1
@@ -200,13 +263,14 @@ class EBMCMC:
             scales.append(vgamma_scale)
         if ecc:
             scales.append(ecc_scale)
-            scales.append(per0_scale)
+            scales.append(per0_scale) # fix these for later
         for _ in range(len(initial_guess) - len(scales)):
             scales.append(0.05)
         scales = np.array(scales)
 
-        G = 6.67430e-8            # Gravitational constant in cgs units
-        a_init = (G * Msum_init * (period_init * 86400)**2 / (4 * np.pi**2))**(1/3)  # Semi-major axis in cm
+        G_solar = 2942.2062175044193  # same constant you use there
+        Msum_init = np.exp(log_Msum_init)
+        a_init = (Msum_init * (self.period**2) * G_solar / (4*np.pi**2))**(1/3)  # in R_sun
         asini_init = a_init * np.sin(np.radians(incl_init))
 
         filename = '{}/mcmc.h5'.format(self.run_dir)
@@ -218,7 +282,8 @@ class EBMCMC:
             print("Starting fresh.")
             backend.reset(nwalkers, len(initial_guess))
             ndim = len(initial_guess)
-            p0 = [initial_guess + scales * np.random.randn(ndim) for _ in range(nwalkers)]
+            if p0 is None:
+                p0 = [initial_guess + scales * np.random.randn(ndim) for _ in range(nwalkers)]
         else:
             print(f"Sampler starting with {n_steps_completed} steps completed.")
             ndim = backend.get_chain().shape[2]
@@ -231,8 +296,9 @@ class EBMCMC:
         #                                use_ellc=use_ellc)
         # else:
         with Pool(processes=threads) as pool:
-            sampler = self.run_sampler(nwalkers, ndim, backend, p0, q_init, 
-                                        asini_init, period_init, Msum_init, t0_init, ecc, 
+            sampler = self.run_sampler(nwalkers, ndim, backend, p0, logit_q_init, 
+                                        asini_init, self.period, self.t0, log_Msum_init, 
+                                        ecc, 
                                         use_ellc=use_ellc, pool=pool,
                                         lc_coeff=lc_coeff, rv_coeff=rv_coeff, 
                                         sed_coeff=sed_coeff)
@@ -243,21 +309,59 @@ class EBMCMC:
         # Save the trace
         # self.save_trace(sampler)
         return sampler
+
+    def make_gaussian_move(self, ndim):
+        # tiny local jiggle; smaller on the touchy geometry dims
+        sig = np.full(ndim, 0.015, dtype=float)    # per-dim stddev
+        touchy = [4, 5, 6]                          # log_rfrac, logit_rsum, logit_cosi
+        for i in touchy:
+            if i < ndim:
+                sig[i] = 0.008
+        cov = np.diag(sig**2)                       # (ndim, ndim) covariance
+        return GaussianMove(cov=cov)
     
-    def run_sampler(self, nwalkers, ndim, backend, p0, q_init, asini_init, period_init, Msum_init,
-                    t0_init, ecc, use_ellc=False, pool=None, lc_coeff=1, rv_coeff=1, sed_coeff=1):
+    def run_sampler(self, nwalkers, ndim, backend, p0, logit_q_init, asini_init, period_init, t0, log_Msum_init,
+                    ecc, use_ellc=False, pool=None, lc_coeff=1, rv_coeff=1, sed_coeff=1):
         print("Getting sampler...")
         sys.stdout.flush()
+        # moves = [
+        #     (StretchMove(a=1.2), 0.1),
+        #     (DEMove(), 0.4),
+        #     (KDEMove(), 0.5)
+        # ]   
+        geom   = [4, 5, 6]   # log k, logit rsum, logit cosi
+        sedabs = [2, 3, 7]   # log T1, dlogT, log d
+        masses = [0, 1]      # logit q, log Msum
+        noise  = [8, 9]      # SED frac jitter, LC jitter
+
+        if backend.iteration < 200:
+            moves = [
+                (StretchMove(a=1.6),                      0.5),
+                (DEMove(gamma0=0.7, nsplits=2),           0.5),
+            ]
+        else:
+            print('Using updated moves')
+            gm = self.make_gaussian_move(ndim)
+            moves = [
+                (StretchMove(a=1.25), 0.65),               # smaller a
+                (DEMove(gamma0=0.5, nsplits=2), 0.25),    # theory-ish gamma
+                (gm,                              0.10),
+            ]
         sampler = emcee.EnsembleSampler(nwalkers, 
                                         ndim, 
                                         lnprob, 
-                                        args=[self.data_dict, q_init, asini_init, 
-                                              period_init, Msum_init, t0_init, ecc, self.rvs, self.eclipsing, 
-                                              use_ellc, lc_coeff, rv_coeff, sed_coeff], 
+                                        args=[self.data_dict, logit_q_init, asini_init, period_init, t0,
+                                              log_Msum_init, self.C, ecc, self.rvs, self.eclipsing, 
+                                              use_ellc, lc_coeff, rv_coeff, sed_coeff, 
+                                              self.compute_phases], 
                                         pool=pool,
-                                        backend=backend)
+                                        backend=backend,
+                                        moves=moves)
 
         print("Running sampling with convergence checks...")
+        print(sampler._moves)
+        print('Sampler moves: ^')
+        sys.stdout.flush()
 
         max_n = 100000  # Maximum number of steps
         thin = 1       # Keep every 10th sample to reduce autocorrelation (adjust as needed)
@@ -296,10 +400,9 @@ class EBMCMC:
 
         return sampler
     
-    def set_run_dir(self, prev_run_dir):
+    def set_run_dir(self, prev_run_dir=None, new_name=None):
         if prev_run_dir is None:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            run_dir = os.path.join(self.trace_dir, f"run_{timestamp}")
+            run_dir = os.path.join(self.trace_dir, f"run_{new_name}")
             os.makedirs(run_dir, exist_ok=True)
             self.run_dir = run_dir
         else:
