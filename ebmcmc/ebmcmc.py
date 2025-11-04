@@ -8,12 +8,11 @@ import emcee
 from datetime import datetime
 import logging
 from tqdm import tqdm
-import binarysed
-from ebmcmc.loglike import lnprob
+from ebmcmc import loglike
 from emcee.moves import StretchMove, DEMove, KDEMove, GaussianMove
 from multiprocessing import Pool
 from joblib import Parallel, delayed
-
+    
 class EBMCMC:
     """
     A class for performing Markov Chain Monte Carlo (MCMC) sampling on binary star systems using PHOEBE and pymc.
@@ -29,13 +28,13 @@ class EBMCMC:
         self.rvs = False
         self.compute_phases = None
         self.data_dict = self.create_data_dict(datasets=datasets)
+        self.A_obs, self.sigma_A = self.estimate_ell_amp()
         self.eclipsing = eclipsing
         self.ecc = ecc
         self.trace_dir = trace_dir
         self.C = 0
         self.period = None
         self.t0 = 0
-
         self.initialize_bundle()
         self.initialize_logging()
         self.set_run_dir(prev_run_dir, new_run_dir)
@@ -117,6 +116,20 @@ class EBMCMC:
 
     def softplus_inv(self, y):                # y > 0
         return np.log(np.expm1(y))
+
+    def estimate_ell_amp(self):
+        # use first LC with a mask enabled
+        ds = next(ds for ds in self.data_dict if ds.startswith("lc"))
+        y  = self.data_dict[ds]["data"]
+        sig = self.data_dict[ds]["sigmas"]
+        m  = np.isfinite(y) & np.isfinite(sig)
+        y  = y[m]
+        # robust half peak-to-peak
+        p5, p95 = np.percentile(y, [5, 95])
+        A_obs = 0.5*(p95 - p5)
+        # uncertainty — very generous
+        sigma_A = max(0.5*A_obs, 5*np.median(sig[m]))
+        return max(A_obs, 1e-5), sigma_A
 
     def get_initial_values(self, ecc):
         self.period = self.bundle.get_value("period@binary@component")
@@ -278,6 +291,7 @@ class EBMCMC:
 
         try:
             n_steps_completed = backend.iteration
+            ndim = backend.get_chain().shape[2]
         except:
             print("Starting fresh.")
             backend.reset(nwalkers, len(initial_guess))
@@ -286,7 +300,6 @@ class EBMCMC:
                 p0 = [initial_guess + scales * np.random.randn(ndim) for _ in range(nwalkers)]
         else:
             print(f"Sampler starting with {n_steps_completed} steps completed.")
-            ndim = backend.get_chain().shape[2]
             p0 = backend.get_chain()[-1]
 
         # # Create the emcee sampler
@@ -295,9 +308,9 @@ class EBMCMC:
         #                                asini_init, period_init, t0_init, ecc,
         #                                use_ellc=use_ellc)
         # else:
-        with Pool(processes=threads) as pool:
+        with Pool(processes=threads, initializer=loglike._pool_init, initargs=(self.data_dict, self.compute_phases, use_ellc)) as pool:
             sampler = self.run_sampler(nwalkers, ndim, backend, p0, logit_q_init, 
-                                        asini_init, self.period, self.t0, log_Msum_init, 
+                                        asini_init, self.period, log_dist_init, self.t0, log_Msum_init, 
                                         ecc, 
                                         use_ellc=use_ellc, pool=pool,
                                         lc_coeff=lc_coeff, rv_coeff=rv_coeff, 
@@ -320,7 +333,7 @@ class EBMCMC:
         cov = np.diag(sig**2)                       # (ndim, ndim) covariance
         return GaussianMove(cov=cov)
     
-    def run_sampler(self, nwalkers, ndim, backend, p0, logit_q_init, asini_init, period_init, t0, log_Msum_init,
+    def run_sampler(self, nwalkers, ndim, backend, p0, logit_q_init, asini_init, period_init, log_dist_init, t0, log_Msum_init,
                     ecc, use_ellc=False, pool=None, lc_coeff=1, rv_coeff=1, sed_coeff=1):
         print("Getting sampler...")
         sys.stdout.flush()
@@ -349,11 +362,11 @@ class EBMCMC:
             ]
         sampler = emcee.EnsembleSampler(nwalkers, 
                                         ndim, 
-                                        lnprob, 
-                                        args=[self.data_dict, logit_q_init, asini_init, period_init, t0,
+                                        loglike.lnprob, 
+                                        args=[self.data_dict, logit_q_init, asini_init, period_init, log_dist_init, t0,
                                               log_Msum_init, self.C, ecc, self.rvs, self.eclipsing, 
                                               use_ellc, lc_coeff, rv_coeff, sed_coeff, 
-                                              self.compute_phases], 
+                                              self.compute_phases, self.A_obs, self.sigma_A], 
                                         pool=pool,
                                         backend=backend,
                                         moves=moves)

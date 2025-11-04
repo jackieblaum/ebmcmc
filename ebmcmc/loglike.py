@@ -1,12 +1,20 @@
 import phoebe
 import numpy as np
-import binarysed
+from binarysed.binarysed import SED
 import sys
 import time
 import logging
 from scipy.interpolate import interp1d
 
 MODEL_TEMPLATE = None
+
+_WORKER_STATE = {}
+
+def _pool_init(data_dict, model_phases, use_ellc):
+    """Initializer for multiprocessing Pool: build a bundle once per process."""
+    b, sed_obj = _build_template_bundle(data_dict, model_phases, use_ellc)
+    _WORKER_STATE["b"] = b
+    _WORKER_STATE["sed_obj"] = sed_obj
 
 def _build_template_bundle(data_dict, model_phases, use_ellc):
     b = phoebe.default_binary()
@@ -60,20 +68,37 @@ def _build_template_bundle(data_dict, model_phases, use_ellc):
 
     b.flip_constraint("mass@primary", solve_for="sma@binary@component")
 
-    sed_obj = binarysed.SED(data_dict["sed"]) 
+    sed_obj = SED(data_dict["sed"])
 
     return b, sed_obj
 
-def _get_template_bundle(data_dict, model_phases, use_ellc):
-    global MODEL_TEMPLATE
-    if MODEL_TEMPLATE is None:
-        MODEL_TEMPLATE = _build_template_bundle(data_dict, model_phases, use_ellc)
-    return MODEL_TEMPLATE
+def soft_barrier(x, lower=None, upper=None, k=10.0):
+    """
+    Returns a non-positive penalty; 0 if inside [lower, upper].
+    Penalty grows smoothly (≈k*softplus) when outside.
+    """
+    pen = 0.0
+    if lower is not None:
+        pen -= k * np.log1p(np.exp(lower - x))
+    if upper is not None:
+        pen -= k * np.log1p(np.exp(x - upper))
+    return pen
+
+def roche_lobe_frac(q):
+    # Eggleton 1983; RL/a for primary (1) and secondary (2)
+    q = np.clip(q, 1e-6, 1e6)
+    RL1 = 0.49*q**(-2/3) / (0.6*q**(-2/3) + np.log1p(q**(-1/3)))
+    RL2 = 0.49*q**( 2/3) / (0.6*q**( 2/3) + np.log1p(q**( 1/3)))
+    return RL1, RL2
+
+def logit(p):
+    p = np.clip(p, 1e-9, 1-1e-9)
+    return np.log(p) - np.log1p(1-p)
 
 
-def lnprob(params, data_dict, logit_q_init, asini_init, period_init, t0, log_Msum_init,
+def lnprob(params, data_dict, logit_q_init, asini_init, period_init, log_dist_init, t0, log_Msum_init,
             C, ecc_bool, rv_bool, eclipsing, use_ellc,
-           lc_coeff, rv_coeff, sed_coeff, model_phases):
+           lc_coeff, rv_coeff, sed_coeff, model_phases, A_obs, sigma_A):
     """
     Computes the log-probability by combining the log-prior and the log-likelihood.
     
@@ -89,20 +114,20 @@ def lnprob(params, data_dict, logit_q_init, asini_init, period_init, t0, log_Msu
     start_time = time.time()
     # print(f"lnprob called with {params}")
     sys.stdout.flush()
-    try:
-        lp = lnprior(params, logit_q_init, asini_init, period_init, log_Msum_init, C, ecc_bool, rv_bool, eclipsing)
-        if not np.isfinite(lp):
-            raise ValueError(f'log prior not finite: {lp}')
-        elapsed_time = time.time() - start_time
-        # print(f"lnprob completed in {elapsed_time:.5f} seconds: lp={lp}")
-        sys.stdout.flush()
-        return lp + lnlikelihood(params, data_dict, C, period_init, t0, ecc_bool, rv_bool, use_ellc, 
-                                 lc_coeff=lc_coeff, rv_coeff=rv_coeff, sed_coeff=sed_coeff,
-                                 model_phases=model_phases)
-    except Exception as e:
-        print(f"lnprob failed: {e}")
-        sys.stdout.flush()
+    # try:
+    lp = lnprior(params, logit_q_init, asini_init, period_init, log_dist_init, log_Msum_init, C, ecc_bool, rv_bool, eclipsing, A_obs, sigma_A)
+    if not np.isfinite(lp):
         return -np.inf
+    elapsed_time = time.time() - start_time
+    # print(f"lnprob completed in {elapsed_time:.5f} seconds: lp={lp}")
+    sys.stdout.flush()
+    return lp + lnlikelihood(params, data_dict, C, period_init, t0, ecc_bool, rv_bool, use_ellc, 
+                                lc_coeff=lc_coeff, rv_coeff=rv_coeff, sed_coeff=sed_coeff,
+                                model_phases=model_phases)
+    # except Exception as e:
+    #     print(f"lnprob failed: {e}")
+    #     sys.stdout.flush()
+    #     return -np.inf
 
 def sigmoid(z): 
         return 1/(1+np.exp(-z))
@@ -119,9 +144,11 @@ def transform_params(params, period, rv_bool, ecc_bool):
     teff1 = np.exp(log_teff1)
     teff2 = np.exp(log_tefffrac + log_teff1)
     rfrac = np.exp(log_rfrac)
-    rsumfrac = sigmoid(logit_rsumfrac)
-    r1frac = rsumfrac/(1+rfrac)
-    r2frac = rfrac*r1frac
+    eps = 1e-3
+    rsumfrac = (1.0 - eps) * sigmoid(logit_rsumfrac)   # strictly < 1
+    rfrac     = np.exp(log_rfrac)
+    r1frac    = rsumfrac/(1+rfrac)
+    r2frac    = rsumfrac - r1frac
     cosi = sigmoid(logit_cosi)
     incl = np.degrees(np.arccos(cosi))
     dist = np.exp(log_dist)
@@ -154,7 +181,7 @@ def transform_params(params, period, rv_bool, ecc_bool):
 
     return q, Msum, teff1, teff2, requiv1, requiv2, a, incl, dist
 
-def lnprior(params, logit_q_init, asini_init, period, log_Msum_init, C, ecc_bool, rv_bool, eclipsing):
+def lnprior(params, logit_q_init, asini_init, period, log_dist_init, log_Msum_init, C, ecc_bool, rv_bool, eclipsing, A_obs, sigma_A):
     """
     Defines the log-prior function for the parameters.
     
@@ -177,7 +204,7 @@ def lnprior(params, logit_q_init, asini_init, period, log_Msum_init, C, ecc_bool
     if not (0 < q <= 1):
         # print(f"q value: {q}")
         return -np.inf
-    if not (0.1 < Msum < 500):  # Stellar mass range
+    if not (0.1 < Msum):  # Stellar mass range
         # print(f"Msum value: {Msum}")
         return -np.inf
     # if not (period_init-0.1 < period < period_init+0.1):
@@ -192,18 +219,23 @@ def lnprior(params, logit_q_init, asini_init, period, log_Msum_init, C, ecc_bool
     if not (2500 < teff2 < 50000):
         # print(f"teff_secondary value: {teff2}")
         return -np.inf
-    if not (1e-6 < requiv1 < a):
-        # print(f"requiv_secondary value: {requiv1}")
-        return -np.inf
-    if not (1e-6 < requiv2 < a):
-        # print(f"requiv_secondary value: {requiv2}")
-        return -np.inf
+    RL1, RL2 = roche_lobe_frac(q)
+
+    # keep the stars below ~85% of their RLs (softly)
+    log_prior_roche1 = soft_barrier(requiv1/a, upper=0.85*RL1, k=10.0)
+    log_prior_roche2 = soft_barrier(requiv2/a, upper=0.85*RL2, k=10.0)
+
+    A_model = ( q*(requiv1/a)**3 + (requiv2/a)**3 ) * (np.sin(np.radians(incl))**2)
+    log_prior_amplitude = soft_barrier(A_model, lower=0.5*A_obs, k=5.0)
+
+    
     if not (0 < incl < 90):
         # print(f"incl value: {incl}")
         return -np.inf
-    if not (0 < dist < 1e5):
-        # print(f"dist value: {dist}")
-        return -np.inf
+    mu_logd = log_dist_init
+    sigma_logd = 0.25
+    log_prior_dist = -0.5 * ((np.log(dist) - mu_logd) / sigma_logd)**2
+    log_prior_dist_max = soft_barrier(dist, upper=1200.0, k=0.8)
     # else:
     #     i_max_rad = np.arccos(requivsumfrac)
     #     i_max = np.degrees(i_max_rad)
@@ -229,16 +261,40 @@ def lnprior(params, logit_q_init, asini_init, period, log_Msum_init, C, ecc_bool
 
     # Uniform priors return 0 (log(1)); if Gaussian, use -0.5 * ((param - mu)/sigma)**2
     q_init = sigmoid(logit_q_init)
-    log_prior_q = -0.5 * ((np.log(q) - np.log(q_init)) / (np.log(q_init) * 0.05))**2  # Gaussian prior with mean q_init and std dev 0.01 * q_init
+    sigma_logit_q = 0.35    # ~weak; tune 0.2–0.6 if needed
+    log_prior_q = -0.5 * ((logit(q) - logit(q_init)) / sigma_logit_q)**2
     # log_prior_period = -0.5 * ((period - period_init) / (0.001 * period_init))**2
     # log_prior_t0_supconj = -0.5 * ((t0_supconj - t0_init) / (0.02 * period_init))**2
     # log_prior_K1 = -0.5 * ((K1 - K1_init) / (0.05 * K1_init))**2
     # log_prior_K2 = -0.5 * ((K2 - K2_init) / (0.05 * K2_init))**2
 
-    # Gaussian prior on asini
+    r_sum_over_a = (requiv1 + requiv2) / a
+    cosi = np.cos(np.radians(incl))
+
+    # we want: cos(i) > r_sum_over_a  (i.e. below eclipse limit)
+    # add a soft penalty if we violate it
+    log_prior_noneclipse = soft_barrier(cosi, lower=r_sum_over_a + 0.01, k=12.0)
+
+    alpha_IMF = 2.3
+    log_prior_msum = -alpha_IMF * np.log(Msum)
+
+    G     = 2942.2062175044193
+    a_init = (np.exp(log_Msum_init) * period**2 * G / (4*np.pi**2))**(1/3)
+    a_from_msum = (Msum * period**2 * G / (4*np.pi**2))**(1/3)
+    log_prior_a = -0.5 * ((np.log(a_from_msum) - np.log(a_init))/0.7)**2
+
+    # optional soft safety net instead of a hard cap
+    log_prior_msum_upper = soft_barrier(Msum, upper=15.0, k=3.0)
+
+    A_model = ( q*(requiv1/a)**3 + (requiv2/a)**3 ) * (np.sin(np.radians(incl))**2)
+
+    # log-space weak match to observed semi-amplitude
+    log_prior_amplitude = -0.5 * ((np.log(A_model + 1e-12) - np.log(A_obs)) / 0.5)**2
+
+    # Gaussian prior on asini   
     asini = a * np.sin(np.radians(incl))
-    log_prior_asini = -0.5 * ((asini - asini_init) / (0.05*asini_init))**2
-    log_prior_total = log_prior_q + log_prior_asini #+ log_prior_ridge#+ log_prior_K1 + log_prior_K2
+    log_prior_asini = -0.5 * ((asini - asini_init) / (0.03*asini_init))**2
+    log_prior_total = log_prior_q + log_prior_asini + log_prior_roche1 + log_prior_roche2 + log_prior_a + log_prior_msum + log_prior_msum_upper + log_prior_dist + log_prior_dist_max + log_prior_amplitude + log_prior_noneclipse#+ log_prior_ridge#+ log_prior_K1 + log_prior_K2
 
     if eclipsing:
         log_prior_total += log_prior_incl
@@ -255,14 +311,26 @@ def lnprior(params, logit_q_init, asini_init, period, log_Msum_init, C, ecc_bool
     log_prior_alpha = (a-1)*np.log(tilde + 1e-12) + (b-1)*np.log(1-tilde + 1e-12)
     log_prior_total += log_prior_alpha
 
-
     return log_prior_total
 
 def forward_model(params, data_dict, C, period, t0, ecc_bool, rv_bool, use_ellc, model_phases=None):
     # Decode params (unchanged)
     q, Msum, teff1, teff2, requiv1, requiv2, a, incl, dist = transform_params(params, period, rv_bool, ecc_bool)
 
-    b, sed_obj = _get_template_bundle(data_dict, model_phases, use_ellc)  # ← reuse
+    if not _WORKER_STATE:  # fallback for single-process/no-pool runs
+        _pool_init(data_dict, model_phases, use_ellc)
+
+    base_b = _WORKER_STATE["b"]
+    sed_obj = _WORKER_STATE["sed_obj"]
+    try:
+        b = base_b.copy()        # preferred if available
+    except Exception:
+        b = base_b.deepcopy()
+
+    b.set_value_all("ld_mode", "lookup" if use_ellc else "interp")
+    b.set_value_all("ntriangles", value=1500)
+    b.set_value("eclipse_method", value="native")
+    b.set_value_all("pblum_mode", "component-coupled")
 
     # set system parameters
     M1 = Msum/(1.0+q)
@@ -281,27 +349,19 @@ def forward_model(params, data_dict, C, period, t0, ecc_bool, rv_bool, use_ellc,
         b.set_value("ecc@binary@component", 0.0)
         b.set_value("per0@binary@component", 0.0)
 
-    # physics tweaks (as you had)
-    if teff1 > 8000:
-        b.set_value("gravb_bol@primary", value=0.9)
-        b.set_value("irrad_frac_refl_bol@primary", value=1.0)
-    else:
-        b.set_value("gravb_bol@primary", value=0.32)
-        b.set_value("irrad_frac_refl_bol@primary", value=0.6)
-    if teff2 > 8000:
-        b.set_value("gravb_bol@secondary", value=0.9)
-        b.set_value("irrad_frac_refl_bol@secondary", value=1.0)
-    else:
-        b.set_value("gravb_bol@secondary", value=0.32)
-        b.set_value("irrad_frac_refl_bol@secondary", value=0.6)
+    b.set_value("gravb_bol@primary",   value=(0.9  if teff1 > 8000 else 0.32))
+    b.set_value("irrad_frac_refl_bol@primary",   value=(1.0  if teff1 > 8000 else 0.6))
+    b.set_value("gravb_bol@secondary", value=(0.9  if teff2 > 8000 else 0.32))
+    b.set_value("irrad_frac_refl_bol@secondary", value=(1.0  if teff2 > 8000 else 0.6))
 
-    logg_primary = b.get_value("logg@primary@component") 
-    logg_secondary = b.get_value("logg@secondary@component")
+    # limb-darkening source: set *both* branches explicitly
+    logg_primary  = b.get_value("logg@primary@component")
+    logg_secondary= b.get_value("logg@secondary@component")
 
-    if teff1 < 3000 or logg_primary > 5: 
-        b.set_value_all('ld_coeffs_source@primary', value='phoenix') 
-    if teff2 < 3000 or logg_secondary > 5: 
-        b.set_value_all('ld_coeffs_source@secondary', value='phoenix')
+    src1 = 'phoenix' if (teff1 < 3000 or logg_primary  > 5) else 'ck2004'
+    src2 = 'phoenix' if (teff2 < 3000 or logg_secondary> 5) else 'ck2004'
+    b.set_value_all('ld_coeffs_source_bol@primary',  value=src1)
+    b.set_value_all('ld_coeffs_source_bol@secondary',value=src2)
 
     # compute
     if use_ellc:
@@ -323,13 +383,18 @@ def forward_model(params, data_dict, C, period, t0, ecc_bool, rv_bool, use_ellc,
             observed_times = b.get_value(f"times@{dataset}@dataset") 
             observed_phases = b.to_phase(observed_times) 
             # Ensure model_phases and model_fluxes are sorted 
-            sort_idx = np.argsort(model_phases) 
-            # Get sorting order 
-            model_phases_sorted = np.array(model_phases)[sort_idx] 
-            model_fluxes_sorted = np.array(model_fluxes)[sort_idx] 
-            # Create interpolation function 
-            interp_func = interp1d(model_phases_sorted, model_fluxes_sorted, kind="cubic", fill_value="extrapolate") 
-            # Interpolate at the actual observed times 
+            sort_idx = np.argsort(model_phases)
+            phi = np.array(model_phases)[sort_idx]
+            flux = np.array(model_fluxes)[sort_idx]
+
+            # append periodic endpoint (phi+1 -> wrap)
+            phi_per  = np.concatenate([phi,  phi[:1] + 1.0])
+            flux_per = np.concatenate([flux, flux[:1]])
+
+            interp_func = interp1d(phi_per, flux_per, kind="linear",  # linear is safer at wrap
+                                bounds_error=False, fill_value="extrapolate")
+
+            observed_phases = b.to_phase(observed_times)
             interpolated_fluxes = interp_func(observed_phases) 
             y_data = data_dict[dataset]["data"] 
             # if you have an out-of-eclipse mask, use it; else median is ok for ellipsoidal LCs 
@@ -397,14 +462,14 @@ def lnlikelihood(params, data_dict, C, period, t0, ecc_bool, rv_bool, use_ellc, 
         # print('Calculating likelihood...')
         sys.stdout.flush()
         y_pred_lc, y_pred_rv_primary, y_pred_rv_secondary, sed_model = forward_model(params, 
-                                                                                     data_dict, 
-                                                                                     C,
-                                                                                     period,
-                                                                                     t0,
-                                                                                     ecc_bool, 
-                                                                                     rv_bool, 
-                                                                                     use_ellc,
-                                                                                     model_phases=model_phases)   
+                                                                                        data_dict, 
+                                                                                        C,
+                                                                                        period,
+                                                                                        t0,
+                                                                                        ecc_bool, 
+                                                                                        rv_bool, 
+                                                                                        use_ellc,
+                                                                                        model_phases=model_phases)   
         # print('Successful computation.')
         if y_pred_lc is None:
             return -np.inf
@@ -435,7 +500,7 @@ def lnlikelihood(params, data_dict, C, period, t0, ecc_bool, rv_bool, use_ellc, 
         data_lc = data_dict[dataset]["data"]
         sigma_lc_obs = data_dict[dataset]["sigmas"]
         
-        sigma_floor_lc = max(3e-4, 0.5 * np.nanmedian(sigma_lc_obs))  # e.g., 3e-4–8e-4                                       # ~3% fractional SED jitter
+        sigma_floor_lc = max(1e-3, np.nanmedian(sigma_lc_obs))  # e.g., 3e-4–8e-4                                       # ~3% fractional SED jitter
 
         # map to physical jitters with floors
         sigma_lc  = sigma_floor_lc + softplus(eta_sigma_lc)    # additive (relative flux)
@@ -465,8 +530,8 @@ def lnlikelihood(params, data_dict, C, period, t0, ecc_bool, rv_bool, use_ellc, 
     if "sed" in data_dict and sed_model is not None:
         data_sed = data_dict["sed"]["fluxes"]
         sigma_sed = data_dict["sed"]["flux_errs"]
-        alpha_floor = 0.03
-        alpha_cap   = 0.50
+        alpha_floor = 0.02
+        alpha_cap   = 0.15
         alpha_sed   = alpha_floor + (alpha_cap - alpha_floor) * (1.0 / (1.0 + np.exp(-eta_alpha_sed)))
         # alpha_sed = alpha_floor + softplus(eta_alpha_sed)
         var = sigma_sed**2 + (alpha_sed * sed_model)**2
@@ -484,7 +549,7 @@ def lnlikelihood(params, data_dict, C, period, t0, ecc_bool, rv_bool, use_ellc, 
     if N_sed_points != 0:
         w_SED = (N_lc_points + N_rv_points) / N_sed_points if (N_lc_points + N_rv_points) > 0 else 1
 
-    print(f"Reduced Chi2: LC - {chi2_lc * w_LC}, RV - {chi2_rv * w_RV}, SED - {chi2_sed * w_SED}")
+    print(f"Scaled NLL terms: LC - {chi2_lc * w_LC}, RV - {chi2_rv * w_RV}, SED - {chi2_sed * w_SED}")
     # print(f"Reduced Chi2: LC - {chi2_lc}, RV - {chi2_rv}, SED - {chi2_sed}")
 
     # 1e4 works well
