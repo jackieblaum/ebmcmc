@@ -113,6 +113,26 @@ def _build_template_bundle(data_dict, model_phases, use_ellc):
 
     return b, None
 
+def _t0_from_phase_param(params, period, t0_ref, rv_bool, ecc_bool):
+    """
+    Extract the global phase offset psi_t0 from the sampler vector and convert it to:
+      phi0 in [0,1)
+      t0  = t0_ref + phi0 * period
+    """
+    # indices: 0..7 core, then either [vgamma] or [eta_alpha_sed, eta_sigma_lc]
+    idx = 9 if rv_bool else 10
+
+    # optional ecc/per0 live next
+    if ecc_bool:
+        idx += 2
+
+    # psi_t0 is the last scalar
+    psi_t0 = params[idx]
+    phi0 = frac(psi_t0)          # wrap to [0,1)
+    t0 = t0_ref + phi0 * period
+    return t0, phi0
+
+
 def soft_barrier(x, lower=None, upper=None, k=10.0):
     """
     Returns a non-positive penalty; 0 if inside [lower, upper].
@@ -180,15 +200,16 @@ def transform_params(params, period, rv_bool, ecc_bool, t0_ref=0.0):
         sigma_lc  = params[9]
         idx = 10
 
-    # Ecc/per0 placement depends on BOTH ecc and whether RVs are included
-    if ecc_bool and rv_bool:
-        ecc_val = params[idx]       # matches initial_guess[9]
-        per0_rad = params[idx + 1]  # matches initial_guess[10]
+    if ecc_bool:
+        ecc_val  = params[idx]
+        per0_rad = params[idx + 1]
         idx += 2
-    elif ecc_bool:
-        ecc_val = params[idx]       # matches initial_guess[10]
-        per0_rad = params[idx + 1]  # matches initial_guess[11]
-        idx += 2
+    else:
+        ecc_val  = None
+        per0_rad = None
+
+    psi_t0 = params[idx]
+    idx += 1
 
     q = sigmoid(logit_q)
     Msum = np.exp(log_Msum)
@@ -213,12 +234,10 @@ def transform_params(params, period, rv_bool, ecc_bool, t0_ref=0.0):
     # phi0 = frac(psi_t0)       # [0,1)
     # t0   = t0_ref + phi0*period
 
-    if rv_bool and ecc_bool:
+    if rv_bool:
         return q, Msum, teff1, teff2, requiv1, requiv2, a, incl, dist, vgamma, ecc_val, per0_rad
-    elif rv_bool: 
-        return q, Msum, teff1, teff2, requiv1, requiv2, a, incl, dist, vgamma, None, None
     else:
-        return q, Msum, teff1, teff2, requiv1, requiv2, a, incl, dist, None, None, None 
+        return q, Msum, teff1, teff2, requiv1, requiv2, a, incl, dist, None, ecc_val, per0_rad
 
 
 def lnprior(params, logit_q_init, asini_init, period, log_dist_init, log_Msum_init, C,
@@ -231,6 +250,10 @@ def lnprior(params, logit_q_init, asini_init, period, log_dist_init, log_Msum_in
     if not isinstance(tp, tuple):
         return -np.inf
     q, Msum, teff1, teff2, requiv1, requiv2, a, incl, dist, vgamma, ecc_val, per0_rad = tp
+
+    t0, phi0 = _t0_from_phase_param(params, period, t0_ref=t0_ref,
+                                    rv_bool=rv_bool, ecc_bool=ecc_bool)
+
     # Check priors
     if not (0 < q <= 1):
         # print(f"q value: {q}")
@@ -544,9 +567,12 @@ def lnlikelihood(params, data_dict, C, period, t0_ref, ecc_bool, rv_bool, use_el
         params, period, rv_bool, ecc_bool, t0_ref=t0_ref
     )
 
+    t0, phi0 = _t0_from_phase_param(params, period, t0_ref=t0_ref,
+                                    rv_bool=rv_bool, ecc_bool=ecc_bool)
+
     try:
         y_pred_lc, y_pred_rv_primary, y_pred_rv_secondary, sed_model = forward_model(
-            params, data_dict, C, period, t0_ref, ecc_bool, rv_bool, use_ellc, model_phases=model_phases
+            params, data_dict, C, period, t0, ecc_bool, rv_bool, use_ellc, model_phases=model_phases
         )
         if y_pred_lc is None:
             return -np.inf

@@ -238,6 +238,10 @@ class EBMCMC:
             per0_init = self.bundle.get_value("per0@binary@component")
             per0_rad = np.deg2rad(per0_init)
             init_vals.append(per0_rad)
+
+        psi_t0_init = 0.0
+        init_vals.append(psi_t0_init)
+
             # se = np.sqrt(max(e, 0.0))
             # xe = se * np.cos(per0_rad)
             # ye = se * np.sin(per0_rad)
@@ -332,6 +336,10 @@ class EBMCMC:
         if ecc:
             scales.append(ecc_scale)
             scales.append(per0_scale)
+
+        psi_t0_scale = 0.15
+        scales.append(psi_t0_scale)
+        
         for _ in range(len(initial_guess) - len(scales)):
             scales.append(0.05)
         scales = np.array(scales)
