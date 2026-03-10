@@ -1,24 +1,45 @@
 import phoebe
 import numpy as np
 import os
-import sys
-import scipy.optimize
-import matplotlib.pyplot as plt
 import emcee
-from datetime import datetime
 import logging
-from tqdm import tqdm
 from ebmcmc import loglike
-from emcee.moves import StretchMove, DEMove, KDEMove, GaussianMove
+from ebmcmc.loglike import sigmoid, logit, softplus_inv
+from emcee.moves import StretchMove, DEMove, GaussianMove
 from multiprocessing import Pool
-from joblib import Parallel, delayed
 from dustmaps.edenhofer2023 import Edenhofer2023Query
 from astropy.coordinates import SkyCoord
 import astropy.units as u
+
+logger = logging.getLogger(__name__)
     
 class EBMCMC:
     """
-    A class for performing Markov Chain Monte Carlo (MCMC) sampling on binary star systems using PHOEBE and pymc.
+    MCMC sampler for eclipsing (and ellipsoidal) binary star systems.
+
+    Wraps PHOEBE forward modelling with an emcee ensemble sampler.
+    Supports joint fitting of light curves, radial velocities, and
+    broadband SEDs, with learned per-dataset jitter parameters.
+
+    Parameters
+    ----------
+    bundle : phoebe.Bundle
+        Pre-configured PHOEBE bundle with datasets attached.
+    trace_dir : str, optional
+        Base directory for saving MCMC chains.
+    sed : dict, optional
+        SED data dictionary with keys ``RA``, ``DEC``, ``dist``,
+        ``wavelengths``, ``fluxes``, ``flux_errs``.
+    datasets : list of str, optional
+        Subset of bundle datasets to fit. Defaults to all.
+    eclipsing : bool
+        If True, apply sin(i) prior; if False, apply non-eclipse constraints.
+    ecc : bool
+        If True, fit eccentricity and argument of periastron.
+    prev_run_dir : str, optional
+        Path to a previous run directory to resume from.
+    new_run_dir : str, optional
+        Name for a new run sub-directory under ``trace_dir``.
     """
 
     def __init__(
@@ -56,23 +77,13 @@ class EBMCMC:
             self.bundle.set_value('requiv@primary@component', value=requiv1_max-0.05) # change the primary so the secondary shifts down
             rsumfrac = self.bundle.get_value('requivsumfrac@binary@component')
             self.bundle.set_value('requivsumfrac@binary@component', value=rsumfrac - 0.03)
-        # self.bundle.set_value("gravb_bol@primary",   value=(0.9  if teff1 > 8000 else 0.32))
-        # self.bundle.set_value("irrad_frac_refl_bol@primary",   value=(1.0  if teff1 > 8000 else 0.6))
-        # self.bundle.set_value("gravb_bol@secondary", value=(0.9  if teff2 > 8000 else 0.32))
-        # self.bundle.set_value("irrad_frac_refl_bol@secondary", value=(1.0  if teff2 > 8000 else 0.6))
+        # TODO: Re-enable gravity darkening and per-star LD coefficients for hot stars (T>8000K)
 
         if self.bundle.get_value('incl@binary@component') > 89:
             self.bundle.set_value('incl@binary@component', value=85)
 
-        # limb-darkening source: set *both* branches explicitly
         self.bundle.set_value_all("ld_mode", "lookup")
         self.bundle.set_value("eclipse_method", value="native")
-        # logg_primary  = self.bundle.get_value("logg@primary@component")
-        # logg_secondary= self.bundle.get_value("logg@secondary@component")
-        # src1 = 'phoenix' if (teff1 < 3500 or logg_primary  > 5) else 'ck2004'
-        # src2 = 'phoenix' if (teff2 < 3500 or logg_secondary> 5) else 'ck2004'
-        # self.bundle.set_value_all('ld_coeffs_source@primary',  value=src1)
-        # self.bundle.set_value_all('ld_coeffs_source@secondary',value=src2)
         self.bundle.run_compute(compute='phoebe01', model='latest')
         pblums = self.bundle.compute_pblums(compute='phoebe01', model='latest')
         self.bundle.set_value_all("pblum_mode", "component-coupled")
@@ -105,9 +116,6 @@ class EBMCMC:
 
     def initialize_logging(self):
         """Initializes logging for PHOEBE."""
-        # phoebe_logger = phoebe.logger(
-        #     clevel=None, flevel="CRITICAL", filename="phoebe.log"
-        # )
         phoebe_logger = phoebe.logger(clevel="WARNING", flevel="DEBUG", filename="phoebe.log")
         phoebe_logger.propagate = False
         phoebe.progressbars_off()
@@ -121,10 +129,10 @@ class EBMCMC:
         for dataset in datasets:
             if dataset.startswith("lc"):
                 if self.bundle.get_value(f"{dataset}@enabled@phoebe01"):
-                    print(f'Adding dataset {dataset}')
+                    logger.info('Adding dataset %s', dataset)
                     data_dict[dataset] = self.extract_light_curve_data(dataset)
             elif dataset.startswith("rv"):
-                print(f'Adding dataset {dataset}')
+                logger.info('Adding dataset %s', dataset)
                 data_dict[dataset] = self.extract_rv_data(dataset)
                 self.rvs = True
             else:
@@ -179,16 +187,6 @@ class EBMCMC:
             "secondary_times": secondary_times,
         }
 
-    def logit(self, p):   
-        p = np.clip(p, 1e-9, 1-1e-9)
-        return np.log(p) - np.log1p(-p)
-
-    def sigmoid(self, z): 
-        return 1/(1+np.exp(-z))
-
-    def softplus_inv(self, y):                # y > 0
-        return np.log(np.expm1(y))
-
     def estimate_ell_amp(self):
         # use first LC with a mask enabled
         ds = next(ds for ds in self.data_dict if ds.startswith("lc"))
@@ -204,6 +202,20 @@ class EBMCMC:
         return max(A_obs, 1e-5), sigma_A
 
     def get_initial_values(self, ecc):
+        """
+        Build the initial MCMC parameter vector from bundle values.
+
+        Parameters
+        ----------
+        ecc : bool
+            Whether to include eccentricity parameters.
+
+        Returns
+        -------
+        list of float
+            Initial parameter vector (see ``loglike`` module docstring
+            for the full layout).
+        """
         self.period = self.bundle.get_value("period@binary@component")
         self.t0 = self.bundle.get_value("t0_supconj@binary@component")
         m1 = self.bundle.get_value("mass@primary@component")
@@ -211,15 +223,9 @@ class EBMCMC:
         Msum_init = m1 + m2
         q_init = self.bundle.get_value("q@binary@component")
         q_init = np.clip(q_init, 1e-6, 1-1e-6)
-        u_q_init = self.logit(1.0 - q_init)
+        u_q_init = logit(1.0 - q_init)
         incl_init = self.bundle.get_value("incl@binary@component")
-        # asini_init = self.bundle.get_value("asini@binary@component")
         rsumfrac_init = self.bundle.get_value("requivsumfrac@binary@component")
-        # pblums_init = [
-        #     self.bundle.get_value(f"pblum@primary@{dataset}@dataset")
-        #     for dataset in self.bundle.datasets
-        #     if dataset.startswith("lc") and self.bundle[f'{dataset}@dataset@mask_enabled'].value
-        # ]
         if self.sed is not None:
             dist_init = self.sed["dist"]
         else:
@@ -244,28 +250,23 @@ class EBMCMC:
         cosi_init = np.clip(np.cos(incl_rad), 0.0, 1.0)
         first_lc = next(ds for ds in self.data_dict if ds.startswith("lc"))
         sigma_floor = max(3e-4, 0.5*np.nanmedian(self.data_dict[first_lc]["sigmas"]))
-        alpha_floor = 0.03
 
-        logit_cosi_init = self.logit(cosi_init)
-        logit_q_init = self.logit(q_init)
+        logit_cosi_init = logit(cosi_init)
+        logit_q_init = logit(q_init)
         log_Msum_init = np.log(Msum_init)
         log_rfrac_init = np.log(requiv2_init/requiv1_init)
-        logit_rsumfrac_init = self.logit(rsumfrac_init)
+        logit_rsumfrac_init = logit(rsumfrac_init)
         log_teff1_init = np.log(teff1_init)
         log_tefffrac_init = np.log(teff2_init/teff1_init)
         log_dist_init = np.log(dist_init)
-
-        # self.C = log_Msum_init - 3 * log_requiv1_init
-        # ridge_scale_init = 0
-        # psi_t0_init = 0.0
 
         init_vals = [u_q_init, log_Msum_init, log_teff1_init,
                     log_tefffrac_init, log_rfrac_init, logit_rsumfrac_init, logit_cosi_init,
                     ]
 
         if not self.rvs:
-            eta_sigma_lc_init  = self.softplus_inv(0.3*sigma_floor)
-            eta_alpha_sed_init = self.softplus_inv(0.3*alpha_floor)
+            eta_sigma_lc_init  = softplus_inv(0.3*sigma_floor)
+            eta_alpha_sed_init = softplus_inv(0.3*loglike.ALPHA_FLOOR)
             init_vals.append(log_dist_init)
             init_vals.append(eta_alpha_sed_init)
             init_vals.append(eta_sigma_lc_init)
@@ -274,7 +275,7 @@ class EBMCMC:
             vgamma_init = self.bundle.get_value('vgamma@system')
             init_vals.append(vgamma_init)
             sigma_rv_jit_init = 1.0  # km/s
-            eta_sigma_rv_init = self.softplus_inv(sigma_rv_jit_init)
+            eta_sigma_rv_init = softplus_inv(sigma_rv_jit_init)
             init_vals.append(eta_sigma_rv_init)
         if ecc:
             ecc_init = self.bundle.get_value("ecc@binary@component")
@@ -286,44 +287,45 @@ class EBMCMC:
         psi_t0_init = 0.0
         init_vals.append(psi_t0_init)
 
-            # se = np.sqrt(max(e, 0.0))
-            # xe = se * np.cos(per0_rad)
-            # ye = se * np.sin(per0_rad)
-            # init_vals.append(xe)
-            # init_vals.append(ye)
-    
-        # for pblum in pblums_init:
-        #     init_vals.append(pblum)
-
-        # print("Initial Values:")
-        # print("teffratio:", init_vals[0])
-        # print("incl:", init_vals[1])
-        # print("requivsumfrac:", init_vals[2])
-        # print("requiv_secondary:", init_vals[3])
-        # print("q:", init_vals[4])
-        # print("t0_supconj:", init_vals[5])
-        # print("asini:", init_vals[6])
-        # print("teff_secondary:", init_vals[7])
-        # print("period:", init_vals[8])
-        # if self.rvs:
-        #     print("vgamma:", init_vals[9])
-        # if ecc:
-        #     print("ecc:", init_vals[10])
-        #     print("per0:", init_vals[11])
-        # for i, pblum in enumerate(pblums_init):
-        #     print(f"pblum_{i+1}:", pblum)
         return init_vals
 
 
     def sample(self, ecc=True, nwalkers=32, nsteps=5000, threads=16, use_ellc=False,
                lc_coeff=1, rv_coeff=1, sed_coeff=1, p0=None, prior_info=None):
-        """Runs MCMC sampling using emcee."""
+        """
+        Run the emcee ensemble sampler with automatic convergence checking.
+
+        Parameters
+        ----------
+        ecc : bool
+            Fit eccentricity and argument of periastron.
+        nwalkers : int
+            Number of emcee walkers.
+        nsteps : int
+            Not used directly; convergence is checked automatically.
+        threads : int
+            Number of parallel worker processes.
+        use_ellc : bool
+            Use the ellc backend instead of PHOEBE.
+        lc_coeff, rv_coeff, sed_coeff : float
+            Reserved weighting coefficients (currently unused).
+        p0 : array_like, optional
+            Initial walker positions (nwalkers x ndim).
+        prior_info : dict, optional
+            Additional prior specifications passed to ``lnprior``.
+            Supported keys: ``t0``, ``gaia_dist``, ``q_from_rv``,
+            ``asini_from_rv``, ``msum_cap``.
+
+        Returns
+        -------
+        emcee.EnsembleSampler
+            The sampler object with chains accessible via ``get_chain()``.
+        """
 
         if not use_ellc:
             phoebe.multiprocessing_set_nprocs(threads)
 
         initial_guess = self.get_initial_values(ecc)
-        # print(initial_guess)
         if initial_guess is None:
             raise ValueError("Initial values for parameters cannot be found.")
         
@@ -353,27 +355,15 @@ class EBMCMC:
             ecc_init = initial_guess[idx+3]
             per0_rad_init = initial_guess[idx+4]
         
-        # scales = [0.02, 0.2, 0.01, 0.02, 
-        #         0.01, 0.0002, 0.2, 20, 0.1, 1]
-        cosi_init = self.sigmoid(logit_cosi_init)
+        cosi_init = sigmoid(logit_cosi_init)
         incl_init = np.degrees(np.arccos(cosi_init))
         u_q_init = initial_guess[0]
-        q_init = 1.0 - self.sigmoid(u_q_init)
+        q_init = 1.0 - sigmoid(u_q_init)
         if q_init > 0.99:
             logit_q_scale = 0.001
         else:
             logit_q_scale = 0.01
 
-        log_requiv_scale = 0.02 / np.log(10)
-        # scales = [log_q_scale, 
-        #           0.01, 
-        #           0.0005, 
-        #           0.0002, 
-        #           200, 
-        #           200, 
-        #           log_requiv_scale, 
-        #           log_requiv_scale, 
-        #           0.2]
         scales = [0.03, 0.02, 0.01, 0.01, 0.02, 0.012, 0.03]
 
         vgamma_scale = 2.0
@@ -410,22 +400,15 @@ class EBMCMC:
         try:
             n_steps_completed = backend.iteration
             ndim = backend.get_chain().shape[2]
-        except:
-            print("Starting fresh.")
+        except (OSError, KeyError, AttributeError):
+            logger.info("Starting fresh.")
             backend.reset(nwalkers, len(initial_guess))
             ndim = len(initial_guess)
             if p0 is None:
                 p0 = [initial_guess + scales * np.random.randn(ndim) for _ in range(nwalkers)]
         else:
-            print(f"Sampler starting with {n_steps_completed} steps completed.")
+            logger.info("Sampler starting with %d steps completed.", n_steps_completed)
             p0 = backend.get_chain()[-1]
-
-        # # Create the emcee sampler
-        # if not use_ellc:
-        #     sampler = self.run_sampler(nwalkers, ndim, backend, p0, q_init, 
-        #                                asini_init, period_init, t0_init, ecc,
-        #                                use_ellc=use_ellc)
-        # else:
 
         if prior_info is None:
             prior_info = {}
@@ -438,11 +421,8 @@ class EBMCMC:
                                         lc_coeff=lc_coeff, rv_coeff=rv_coeff, 
                                         sed_coeff=sed_coeff, prior_info=prior_info)
 
-        print("Sampling completed.")
-        sys.stdout.flush()
+        logger.info("Sampling completed.")
 
-        # Save the trace
-        # self.save_trace(sampler)
         return sampler
 
     def make_gaussian_move(self, ndim):
@@ -457,13 +437,8 @@ class EBMCMC:
     
     def run_sampler(self, nwalkers, ndim, backend, p0, logit_q_init, asini_init, period_init, log_dist_init, t0, log_Msum_init, teff1_init,
                     ecc, use_ellc=False, pool=None, lc_coeff=1, rv_coeff=1, sed_coeff=1, prior_info=None):
-        print("Getting sampler...")
-        sys.stdout.flush()
-        # moves = [
-        #     (StretchMove(a=1.2), 0.1),
-        #     (DEMove(), 0.4),
-        #     (KDEMove(), 0.5)
-        # ]   
+        logger.info("Getting sampler...")
+
         geom   = [4, 5, 6]   # log k, logit rsum, logit cosi
         sedabs = [2, 3, 7]   # log T1, dlogT, log d
         masses = [0, 1]      # logit q, log Msum
@@ -475,7 +450,7 @@ class EBMCMC:
                 (DEMove(gamma0=0.7, nsplits=2),           0.5),
             ]
         else:
-            print('Using updated moves')
+            logger.info('Using updated moves')
             gm = self.make_gaussian_move(ndim)
             moves = [
                 (StretchMove(a=1.25), 0.65),               # smaller a
@@ -497,10 +472,9 @@ class EBMCMC:
                                         backend=backend,
                                         moves=moves)
 
-        print("Running sampling with convergence checks...")
-        print(sampler._moves)
-        print('Sampler moves: ^')
-        sys.stdout.flush()
+        logger.info("Running sampling with convergence checks...")
+        logger.debug("Sampler moves: %s", sampler._moves)
+
 
         max_n = 100000  # Maximum number of steps
         thin = 1       # Keep every 10th sample to reduce autocorrelation (adjust as needed)
@@ -512,8 +486,8 @@ class EBMCMC:
         # Run sampling up to `max_n` steps with periodic convergence checks
         for sample in sampler.sample(p0, iterations=max_n, progress=True, thin=thin):
             # Skip initial burn-in period
-            print('Sample fetched.')
-            sys.stdout.flush()
+            logger.debug('Sample fetched.')
+    
             if sampler.iteration < burn_in:
                 continue
             
@@ -523,7 +497,7 @@ class EBMCMC:
                 try:
                     tau = sampler.get_autocorr_time(tol=0)
                 except emcee.autocorr.AutocorrError:
-                    print("Autocorrelation time could not be estimated reliably.")
+                    logger.warning("Autocorrelation time could not be estimated reliably.")
                     continue
 
                 autocorr[index] = np.mean(tau)  # Track average autocorrelation time
@@ -533,7 +507,7 @@ class EBMCMC:
                 converged = np.all(tau * 50 < sampler.iteration)
                 converged &= np.all(np.abs(old_tau - tau) / tau < 0.01)
                 if converged:
-                    print("Convergence reached.")
+                    logger.info("Convergence reached.")
                     break
                 old_tau = tau  # Update old_tau for next comparison
 
@@ -553,7 +527,7 @@ class EBMCMC:
         np.save(os.path.join(self.run_dir, "chain.npy"), sampler.get_chain())
         np.save(os.path.join(self.run_dir, "log_prob.npy"), sampler.get_log_prob())
         np.save(os.path.join(self.run_dir, "sampler_state.npy"), sampler.get_last_sample())
-        print(f"Trace saved to {self.run_dir}")
+        logger.info("Trace saved to %s", self.run_dir)
 
     def check_convergence(self, sampler):
         """Checks convergence by estimating the integrated autocorrelation time."""
