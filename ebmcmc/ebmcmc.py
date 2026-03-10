@@ -44,11 +44,40 @@ class EBMCMC:
 
     def initialize_bundle(self):
         """Initializes PHOEBE bundle values."""
+        teff1 = self.bundle.get_value('teff@primary@component')
+        teff2 = self.bundle.get_value('teff@secondary@component')
+        requiv1 = self.bundle.get_value('requiv@primary@component')
+        requiv2 = self.bundle.get_value('requiv@secondary@component')
+        requiv1_max = self.bundle.get_value('requiv_max@primary@component')
+        requiv2_max = self.bundle.get_value('requiv_max@secondary@component')
+        if requiv1 > requiv1_max:
+            self.bundle.set_value('requiv@primary@component', value=requiv1_max-0.05)
+        if requiv2 > requiv2_max:
+            self.bundle.set_value('requiv@primary@component', value=requiv1_max-0.05) # change the primary so the secondary shifts down
+            rsumfrac = self.bundle.get_value('requivsumfrac@binary@component')
+            self.bundle.set_value('requivsumfrac@binary@component', value=rsumfrac - 0.03)
+        # self.bundle.set_value("gravb_bol@primary",   value=(0.9  if teff1 > 8000 else 0.32))
+        # self.bundle.set_value("irrad_frac_refl_bol@primary",   value=(1.0  if teff1 > 8000 else 0.6))
+        # self.bundle.set_value("gravb_bol@secondary", value=(0.9  if teff2 > 8000 else 0.32))
+        # self.bundle.set_value("irrad_frac_refl_bol@secondary", value=(1.0  if teff2 > 8000 else 0.6))
+
+        if self.bundle.get_value('incl@binary@component') > 89:
+            self.bundle.set_value('incl@binary@component', value=85)
+
+        # limb-darkening source: set *both* branches explicitly
         self.bundle.set_value_all("ld_mode", "lookup")
         self.bundle.set_value("eclipse_method", value="native")
+        # logg_primary  = self.bundle.get_value("logg@primary@component")
+        # logg_secondary= self.bundle.get_value("logg@secondary@component")
+        # src1 = 'phoenix' if (teff1 < 3500 or logg_primary  > 5) else 'ck2004'
+        # src2 = 'phoenix' if (teff2 < 3500 or logg_secondary> 5) else 'ck2004'
+        # self.bundle.set_value_all('ld_coeffs_source@primary',  value=src1)
+        # self.bundle.set_value_all('ld_coeffs_source@secondary',value=src2)
         self.bundle.run_compute(compute='phoebe01', model='latest')
         pblums = self.bundle.compute_pblums(compute='phoebe01', model='latest')
         self.bundle.set_value_all("pblum_mode", "component-coupled")
+
+        self.compute_phases = {}
         for dataset in self.bundle.datasets:
             if not dataset.startswith('rv') and self.bundle[f'{dataset}@dataset@mask_enabled'].value:
                 self.bundle.set_value(f'pblum@primary@{dataset}', pblums[f'pblum@primary@{dataset}'].value)
@@ -64,7 +93,6 @@ class EBMCMC:
             if not dataset.endswith("unbinned"):
                 continue
 
-            self.compute_phases = {}
             # Grab compute_phases directly from the dataset
             phases = self.bundle.get_value(f"compute_phases@{dataset}")
 
@@ -92,8 +120,11 @@ class EBMCMC:
 
         for dataset in datasets:
             if dataset.startswith("lc"):
-                data_dict[dataset] = self.extract_light_curve_data(dataset)
+                if self.bundle.get_value(f"{dataset}@enabled@phoebe01"):
+                    print(f'Adding dataset {dataset}')
+                    data_dict[dataset] = self.extract_light_curve_data(dataset)
             elif dataset.startswith("rv"):
+                print(f'Adding dataset {dataset}')
                 data_dict[dataset] = self.extract_rv_data(dataset)
                 self.rvs = True
             else:
@@ -132,11 +163,18 @@ class EBMCMC:
     def extract_rv_data(self, dataset):
         primary_times = self.bundle.get_value(f"times@{dataset}@primary@dataset")
         secondary_times = self.bundle.get_value(f"times@{dataset}@secondary@dataset")
+        primary_sigmas = self.bundle.get_value(f"sigmas@{dataset}@primary")
+        secondary_sigmas = self.bundle.get_value(f"sigmas@{dataset}@secondary")
+        if primary_sigmas is None:
+            primary_sigmas = np.ones_like(self.bundle.get_value(f"rvs@primary@{dataset}@dataset"), dtype=float)
+        if secondary_sigmas is None:
+            secondary_sigmas = np.ones_like(self.bundle.get_value(f"rvs@secondary@{dataset}@dataset"), dtype=float)
+
         return {
             "primary": self.bundle.get_value(f"rvs@primary@{dataset}@dataset"),
             "secondary": self.bundle.get_value(f"rvs@secondary@{dataset}@dataset"),
-            "primary_sigmas": self.bundle.get_value(f"sigmas@{dataset}@primary"),
-            "secondary_sigmas": self.bundle.get_value(f"sigmas@{dataset}@secondary"),
+            "primary_sigmas": primary_sigmas,
+            "secondary_sigmas": secondary_sigmas,
             "primary_times": primary_times,
             "secondary_times": secondary_times,
         }
@@ -172,6 +210,8 @@ class EBMCMC:
         m2 = self.bundle.get_value("mass@secondary@component")
         Msum_init = m1 + m2
         q_init = self.bundle.get_value("q@binary@component")
+        q_init = np.clip(q_init, 1e-6, 1-1e-6)
+        u_q_init = self.logit(1.0 - q_init)
         incl_init = self.bundle.get_value("incl@binary@component")
         # asini_init = self.bundle.get_value("asini@binary@component")
         rsumfrac_init = self.bundle.get_value("requivsumfrac@binary@component")
@@ -219,22 +259,26 @@ class EBMCMC:
         # ridge_scale_init = 0
         # psi_t0_init = 0.0
 
-        init_vals = [logit_q_init, log_Msum_init, log_teff1_init,
+        init_vals = [u_q_init, log_Msum_init, log_teff1_init,
                     log_tefffrac_init, log_rfrac_init, logit_rsumfrac_init, logit_cosi_init,
-                    log_dist_init]
+                    ]
 
         if not self.rvs:
             eta_sigma_lc_init  = self.softplus_inv(0.3*sigma_floor)
             eta_alpha_sed_init = self.softplus_inv(0.3*alpha_floor)
+            init_vals.append(log_dist_init)
             init_vals.append(eta_alpha_sed_init)
             init_vals.append(eta_sigma_lc_init)
 
         else:
             vgamma_init = self.bundle.get_value('vgamma@system')
             init_vals.append(vgamma_init)
+            sigma_rv_jit_init = 1.0  # km/s
+            eta_sigma_rv_init = self.softplus_inv(sigma_rv_jit_init)
+            init_vals.append(eta_sigma_rv_init)
         if ecc:
             ecc_init = self.bundle.get_value("ecc@binary@component")
-            init_vals.append(ecc)
+            init_vals.append(ecc_init)
             per0_init = self.bundle.get_value("per0@binary@component")
             per0_rad = np.deg2rad(per0_init)
             init_vals.append(per0_rad)
@@ -286,29 +330,35 @@ class EBMCMC:
         logit_q_init = initial_guess[0]
         log_Msum_init = initial_guess[1]
         log_teff1_init = initial_guess[2]
+        teff1_init = np.exp(log_teff1_init)
         log_tefffrac_init = initial_guess[3]
         log_rfrac_init = initial_guess[4]
         logit_rsumfrac_init = initial_guess[5]
         logit_cosi_init = initial_guess[6]
-        log_dist_init = initial_guess[7]
 
+        log_dist_init = None
+
+        idx = 7
         if self.rvs:
-            vgamma = initial_guess[8]
+            vgamma = initial_guess[idx]
         else:
-            alpha_sed = initial_guess[8]
-            sigma_lc = initial_guess[9]
+            log_dist_init = initial_guess[idx]
+            alpha_sed = initial_guess[idx+1]
+            sigma_lc = initial_guess[idx+2]
         if ecc and self.rvs:
-            ecc_init = initial_guess[9]
-            per0_rad_init = initial_guess[10]
+            ecc_init = initial_guess[idx+1]
+            per0_rad_init = initial_guess[idx+2]
+
         elif ecc:
-            ecc_init = initial_guess[10]
-            per0_rad_init = initial_guess[11]
+            ecc_init = initial_guess[idx+3]
+            per0_rad_init = initial_guess[idx+4]
         
         # scales = [0.02, 0.2, 0.01, 0.02, 
         #         0.01, 0.0002, 0.2, 20, 0.1, 1]
         cosi_init = self.sigmoid(logit_cosi_init)
         incl_init = np.degrees(np.arccos(cosi_init))
-        q_init = self.sigmoid(logit_q_init)
+        u_q_init = initial_guess[0]
+        q_init = 1.0 - self.sigmoid(u_q_init)
         if q_init > 0.99:
             logit_q_scale = 0.001
         else:
@@ -324,22 +374,27 @@ class EBMCMC:
         #           log_requiv_scale, 
         #           log_requiv_scale, 
         #           0.2]
-        scales = [0.15, 0.1, 0.02, 0.02, 0.1, 0.1, 0.12, 0.05]
-        vgamma_scale = 10
-        ecc_scale = 0.01
-        per0_scale = 0.01
+        scales = [0.03, 0.02, 0.01, 0.01, 0.02, 0.012, 0.03]
+
+        vgamma_scale = 2.0
+        eta_sigma_rv_scale = 0.2   # log-space-ish; keep moderate to avoid huge sigma_jit proposals
+        ecc_scale = 0.005
+        per0_scale = 0.02
+
         if self.rvs:
             scales.append(vgamma_scale)
+            scales.append(eta_sigma_rv_scale)
         else:
-            scales.append(0.25)
-            scales.append(0.2)
+            scales.append(0.03) # distance
+            scales.append(0.25)  # eta_alpha_sed
+            scales.append(0.2)   # eta_sigma_lc
         if ecc:
             scales.append(ecc_scale)
             scales.append(per0_scale)
 
-        psi_t0_scale = 0.15
+        psi_t0_scale = 0.05
         scales.append(psi_t0_scale)
-        
+
         for _ in range(len(initial_guess) - len(scales)):
             scales.append(0.05)
         scales = np.array(scales)
@@ -377,7 +432,7 @@ class EBMCMC:
 
         with Pool(processes=threads, initializer=loglike._pool_init, initargs=(self.data_dict, self.compute_phases, use_ellc)) as pool:
             sampler = self.run_sampler(nwalkers, ndim, backend, p0, logit_q_init, 
-                                        asini_init, self.period, log_dist_init, self.t0, log_Msum_init, 
+                                        asini_init, self.period, log_dist_init, self.t0, log_Msum_init, teff1_init,
                                         ecc, 
                                         use_ellc=use_ellc, pool=pool,
                                         lc_coeff=lc_coeff, rv_coeff=rv_coeff, 
@@ -400,7 +455,7 @@ class EBMCMC:
         cov = np.diag(sig**2)                       # (ndim, ndim) covariance
         return GaussianMove(cov=cov)
     
-    def run_sampler(self, nwalkers, ndim, backend, p0, logit_q_init, asini_init, period_init, log_dist_init, t0, log_Msum_init,
+    def run_sampler(self, nwalkers, ndim, backend, p0, logit_q_init, asini_init, period_init, log_dist_init, t0, log_Msum_init, teff1_init,
                     ecc, use_ellc=False, pool=None, lc_coeff=1, rv_coeff=1, sed_coeff=1, prior_info=None):
         print("Getting sampler...")
         sys.stdout.flush()
@@ -435,7 +490,7 @@ class EBMCMC:
                                         ndim, 
                                         loglike.lnprob, 
                                         args=[self.data_dict, logit_q_init, asini_init, period_init, log_dist_init, t0,
-                                              log_Msum_init, self.C, ecc, self.rvs, self.eclipsing, 
+                                              log_Msum_init, teff1_init, self.C, ecc, self.rvs, self.eclipsing, 
                                               use_ellc, lc_coeff, rv_coeff, sed_coeff, 
                                               self.compute_phases, self.A_obs, self.sigma_A, prior_info], 
                                         pool=pool,
