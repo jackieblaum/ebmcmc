@@ -60,3 +60,30 @@ def test_build_template_bundle_phoebe_sed():
     assert sed_obj is None
     assert phoebe_sed_obj is not None
     assert len(phoebe_sed_obj.filters) == 2
+
+
+@pytest.mark.phoebe
+def test_ebmcmc_accepts_sed_method_phoebe():
+    """EBMCMC constructor accepts sed_method='phoebe'."""
+    from ebmcmc import EBMCMC
+
+    b = phoebe.default_binary()
+    times = np.linspace(0, 10, 50)
+    fluxes = 1.0 + 0.01 * np.random.randn(len(times))
+    sigmas = 0.01 * np.ones(len(times))
+    b.add_dataset("lc", times=times, fluxes=fluxes, sigmas=sigmas, dataset="lc01")
+    b.set_value("passband@lc01", "TESS:T")
+
+    sed = {
+        "RA": 180.0, "DEC": 30.0, "dist": 500.0,
+        "filters": ["Johnson:V", "2MASS:J"],
+        "fluxes": np.array([1e-12, 1e-13]),
+        "flux_errs": np.array([1e-13, 1e-14]),
+    }
+
+    eb = EBMCMC(b, trace_dir="/tmp/ebmcmc_test", sed=sed,
+                sed_method="phoebe", sed_units="flam",
+                new_run_dir="test_phoebe_sed")
+    assert eb.sed_method == "phoebe"
+    assert eb.sed_units == "flam"
+    assert "sed" in eb.data_dict

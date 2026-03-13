@@ -40,13 +40,30 @@ class EBMCMC:
         Path to a previous run directory to resume from.
     new_run_dir : str, optional
         Name for a new run sub-directory under ``trace_dir``.
+    sed_method : str, optional
+        SED forward modeling method: "binarysed" (default) or "phoebe".
+    sed_units : str, optional
+        Target SED units when sed_method="phoebe": "flam", "fnu_Jy", "ABmag", "Vegamag".
+    per_filter_units : dict, optional
+        Per-filter unit overrides, e.g., {"2MASS:J": "Vegamag"}.
+    sed_phases : list of float, optional
+        Orbital phases for PHOEBE SED computation. Default: [0.25].
+    extinction_law : str, optional
+        Extinction law: "fitzpatrick99" (default) or "ccm89".
     """
 
     def __init__(
-        self, bundle, trace_dir=None, sed=None, datasets=None, eclipsing=True, ecc=True, prev_run_dir=None, new_run_dir=None
+        self, bundle, trace_dir=None, sed=None, datasets=None, eclipsing=True, ecc=True,
+        prev_run_dir=None, new_run_dir=None, sed_method="binarysed", sed_units="flam",
+        per_filter_units=None, sed_phases=None, extinction_law="fitzpatrick99",
     ):
         self.bundle = bundle
         self.sed = sed
+        self.sed_method = sed_method
+        self.sed_units = sed_units
+        self.per_filter_units = per_filter_units
+        self.sed_phases = sed_phases
+        self.extinction_law = extinction_law
         self.min_time = 1e9
         self.max_time = 0
         self.rvs = False
@@ -151,6 +168,10 @@ class EBMCMC:
             R_V = 3.1
             ebv = A_base/R_V
             self.sed["ebv"] = ebv
+
+            if self.sed_method == "phoebe" and "filters" not in self.sed:
+                raise ValueError("sed_method='phoebe' requires 'filters' key in sed dict")
+
             data_dict["sed"] = self.sed
 
         return data_dict
@@ -413,7 +434,10 @@ class EBMCMC:
         if prior_info is None:
             prior_info = {}
 
-        with Pool(processes=threads, initializer=loglike._pool_init, initargs=(self.data_dict, self.compute_phases, use_ellc)) as pool:
+        with Pool(processes=threads, initializer=loglike._pool_init,
+                 initargs=(self.data_dict, self.compute_phases, use_ellc,
+                           self.sed_method, self.sed_units, self.per_filter_units,
+                           self.sed_phases, self.extinction_law)) as pool:
             sampler = self.run_sampler(nwalkers, ndim, backend, p0, logit_q_init, 
                                         asini_init, self.period, log_dist_init, self.t0, log_Msum_init, teff1_init,
                                         ecc, 
@@ -465,9 +489,10 @@ class EBMCMC:
                                         ndim, 
                                         loglike.lnprob, 
                                         args=[self.data_dict, logit_q_init, asini_init, period_init, log_dist_init, t0,
-                                              log_Msum_init, teff1_init, self.C, ecc, self.rvs, self.eclipsing, 
-                                              use_ellc, lc_coeff, rv_coeff, sed_coeff, 
-                                              self.compute_phases, self.A_obs, self.sigma_A, prior_info], 
+                                              log_Msum_init, teff1_init, self.C, ecc, self.rvs, self.eclipsing,
+                                              use_ellc, lc_coeff, rv_coeff, sed_coeff,
+                                              self.compute_phases, self.A_obs, self.sigma_A, prior_info,
+                                              self.sed_method],
                                         pool=pool,
                                         backend=backend,
                                         moves=moves)
