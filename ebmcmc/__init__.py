@@ -1,4 +1,5 @@
 from .ebmcmc import EBMCMC
+from .phoebe_sed import PhoebeSED
 from .loglike import (
     transform_params,
     lnprior,
