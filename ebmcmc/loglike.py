@@ -37,6 +37,7 @@ Final parameter (always last):
 import phoebe
 import numpy as np
 from binarysed.binarysed import SED
+from ebmcmc.phoebe_sed import PhoebeSED
 import time
 import logging
 from scipy.interpolate import interp1d
@@ -137,13 +138,22 @@ def interp_periodic_phase(phi_model, y_model, phi_obs):
 
 
 
-def _pool_init(data_dict, model_phases, use_ellc):
+def _pool_init(data_dict, model_phases, use_ellc, sed_method="binarysed",
+               sed_units="flam", per_filter_units=None, sed_phases=None,
+               extinction_law="fitzpatrick99"):
     """Initializer for multiprocessing Pool: build a bundle once per process."""
-    b, sed_obj = _build_template_bundle(data_dict, model_phases, use_ellc)
+    b, sed_obj, phoebe_sed_obj = _build_template_bundle(
+        data_dict, model_phases, use_ellc, sed_method=sed_method,
+        sed_units=sed_units, per_filter_units=per_filter_units,
+        sed_phases=sed_phases, extinction_law=extinction_law,
+    )
     _WORKER_STATE["b"] = b
     _WORKER_STATE["sed_obj"] = sed_obj
+    _WORKER_STATE["phoebe_sed_obj"] = phoebe_sed_obj
 
-def _build_template_bundle(data_dict, model_phases, use_ellc):
+def _build_template_bundle(data_dict, model_phases, use_ellc, sed_method="binarysed",
+                           sed_units="flam", per_filter_units=None, sed_phases=None,
+                           extinction_law="fitzpatrick99"):
     b = phoebe.default_binary()
 
     # ---- Decide how to choose compute_phases per dataset ----
@@ -222,12 +232,24 @@ def _build_template_bundle(data_dict, model_phases, use_ellc):
 
     b.flip_constraint("mass@primary", solve_for="sma@binary@component")
 
+    sed_obj = None
+    phoebe_sed_obj = None
+
     if "sed" in data_dict:
-        sed_obj = SED(data_dict["sed"])
+        if sed_method == "binarysed":
+            sed_obj = SED(data_dict["sed"])
+        elif sed_method == "phoebe":
+            phoebe_sed_obj = PhoebeSED(
+                filters=data_dict["sed"]["filters"],
+                sed_units=sed_units,
+                per_filter_units=per_filter_units,
+                sed_phases=sed_phases,
+                extinction_law=extinction_law,
+            )
+        else:
+            raise ValueError(f"Unknown sed_method: {sed_method}")
 
-        return b, sed_obj
-
-    return b, None
+    return b, sed_obj, phoebe_sed_obj
 
 def _t0_from_phase_param(params, period, t0_ref, rv_bool, ecc_bool):
     # core: 7 if rv_bool else 8
@@ -282,7 +304,8 @@ def logit(p):
 
 def lnprob(params, data_dict, u_q_init, asini_init, period_init, log_dist_init, t0_ref,
            log_Msum_init, teff1_init, C, ecc_bool, rv_bool, eclipsing, use_ellc,
-           lc_coeff, rv_coeff, sed_coeff, model_phases, A_obs, sigma_A, prior_info=None):
+           lc_coeff, rv_coeff, sed_coeff, model_phases, A_obs, sigma_A,
+           prior_info=None, sed_method="binarysed"):
     start_time = time.time()
     if prior_info is None:
         prior_info = {}
@@ -293,8 +316,8 @@ def lnprob(params, data_dict, u_q_init, asini_init, period_init, log_dist_init, 
         return -np.inf
 
     ll = lnlikelihood(params, data_dict, C, period_init, t0_ref, ecc_bool, rv_bool, use_ellc,
-                             lc_coeff=lc_coeff, rv_coeff=rv_coeff, sed_coeff=sed_coeff,
-                             model_phases=model_phases)
+                      lc_coeff=lc_coeff, rv_coeff=rv_coeff, sed_coeff=sed_coeff,
+                      model_phases=model_phases, sed_method=sed_method)
     if not np.isfinite(ll):
         return -np.inf
 
@@ -604,7 +627,8 @@ def lnprior(params, u_q_init, asini_init, period, log_dist_init, log_Msum_init, 
 
     return log_prior_total
 
-def forward_model(params, data_dict, C, period, t0, ecc_bool, rv_bool, use_ellc, model_phases=None):
+def forward_model(params, data_dict, C, period, t0, ecc_bool, rv_bool, use_ellc,
+                  model_phases=None, sed_method="binarysed"):
     """
     Run PHOEBE (or ellc) forward model and return predicted observables.
 
@@ -750,32 +774,40 @@ def forward_model(params, data_dict, C, period, t0, ecc_bool, rv_bool, use_ellc,
                 
     sed_model = None
     if (not rv_bool) and ("sed" in data_dict):
-        if np.isnan(data_dict["sed"]["dist"]): 
+        if np.isnan(data_dict["sed"]["dist"]):
             logger.warning("No distance available; leaving SED out of the fit.")
-            sed_model = None 
-        else: 
+            sed_model = None
+        else:
             try:
-                wavelengths = data_dict["sed"]["wavelengths"] 
-                logg1 = b.get_value("logg@primary@component") 
-                logg2 = b.get_value("logg@secondary@component") 
-                sed_model = sed_obj.create_apparent_sed(wavelengths, teff1, teff2, requiv1, requiv2, logg1, logg2, dist, select_wavelengths=True ) 
-                
-                if not np.all(np.isfinite(sed_model)):
+                if sed_method == "phoebe":
+                    phoebe_sed_obj = _WORKER_STATE["phoebe_sed_obj"]
+                    ebv = data_dict["sed"].get("ebv", 0.0)
+                    compute = "ellcbackend" if use_ellc else "phoebe01"
+                    sed_model = phoebe_sed_obj.compute_sed(b, dist, ebv=ebv, compute=compute)
+                else:
+                    sed_obj = _WORKER_STATE["sed_obj"]
+                    wavelengths = data_dict["sed"]["wavelengths"]
+                    logg1 = b.get_value("logg@primary@component")
+                    logg2 = b.get_value("logg@secondary@component")
+                    sed_model = sed_obj.create_apparent_sed(
+                        wavelengths, teff1, teff2, requiv1, requiv2,
+                        logg1, logg2, dist, select_wavelengths=True,
+                    )
+
+                if sed_model is not None and not np.all(np.isfinite(sed_model)):
                     raise ValueError("SED contains non-finite values.")
             except Exception as e:
-                # Print a compact debug bundle to trace the bad region
                 logger.debug("[SED ERROR] %s  dist=%.3f, teff1=%.1f, teff2=%.1f, "
                              "r1=%.4f, r2=%.4f, incl=%.3f",
                              e, dist, teff1, teff2, requiv1, requiv2, incl)
-                # Force the likelihood to reject this point gracefully
                 return None, None, None, None
-    else: 
+    else:
         sed_model = None 
             
     return y_pred_lc, y_pred_rv_primary, y_pred_rv_secondary, sed_model 
 
 def lnlikelihood(params, data_dict, C, period, t0_ref, ecc_bool, rv_bool, use_ellc, model_phases,
-                 lc_coeff=1, rv_coeff=1, sed_coeff=1):
+                 lc_coeff=1, rv_coeff=1, sed_coeff=1, sed_method="binarysed"):
     """
     Compute the log-likelihood for the binary model.
 
@@ -820,7 +852,8 @@ def lnlikelihood(params, data_dict, C, period, t0_ref, ecc_bool, rv_bool, use_el
 
     try:
         y_pred_lc, y_pred_rv_primary, y_pred_rv_secondary, sed_model = forward_model(
-            params, data_dict, C, period, t0, ecc_bool, rv_bool, use_ellc, model_phases=model_phases
+            params, data_dict, C, period, t0, ecc_bool, rv_bool, use_ellc,
+            model_phases=model_phases, sed_method=sed_method,
         )
         if y_pred_lc is None:
             return -np.inf
