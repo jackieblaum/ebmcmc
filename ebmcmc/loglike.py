@@ -663,10 +663,9 @@ def forward_model(params, data_dict, C, period, t0, ecc_bool, rv_bool, use_ellc,
     q, Msum, teff1, teff2, requiv1, requiv2, a, incl, dist, vgamma, ecc_val, per0_rad = transform_params(params, period, rv_bool, ecc_bool)
 
     if not _WORKER_STATE:  # fallback for single-process/no-pool runs
-        _pool_init(data_dict, model_phases, use_ellc)
+        _pool_init(data_dict, model_phases, use_ellc, sed_method=sed_method)
 
     base_b = _WORKER_STATE["b"]
-    sed_obj = _WORKER_STATE["sed_obj"]
     try:
         b = base_b.copy()        # preferred if available
     except Exception:
@@ -780,7 +779,12 @@ def forward_model(params, data_dict, C, period, t0, ecc_bool, rv_bool, use_ellc,
         else:
             try:
                 if sed_method == "phoebe":
-                    phoebe_sed_obj = _WORKER_STATE["phoebe_sed_obj"]
+                    phoebe_sed_obj = _WORKER_STATE.get("phoebe_sed_obj")
+                    if phoebe_sed_obj is None:
+                        raise RuntimeError(
+                            "sed_method='phoebe' but PhoebeSED was not initialized. "
+                            "Ensure _pool_init is called with sed_method='phoebe'."
+                        )
                     ebv = data_dict["sed"].get("ebv", 0.0)
                     compute = "ellcbackend" if use_ellc else "phoebe01"
                     sed_model = phoebe_sed_obj.compute_sed(b, dist, ebv=ebv, compute=compute)
