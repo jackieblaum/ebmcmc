@@ -44,6 +44,14 @@ VEGA_ZP_JY = {
 
 C_LIGHT_M_S = 2.99792458e8
 
+# Filters where the native magnitude system is AB (Vegamag = ABmag for these)
+_AB_NATIVE_FILTERS = {
+    "SDSS:u", "SDSS:g", "SDSS:r", "SDSS:i", "SDSS:z",
+    "Pan-Starrs:g", "Pan-Starrs:r", "Pan-Starrs:i", "Pan-Starrs:z",
+    "Pan-Starrs:y", "Pan-Starrs:w",
+    "GALEX:FUV", "GALEX:NUV",
+}
+
 
 class PhoebeSED:
     """
@@ -81,14 +89,24 @@ class PhoebeSED:
         self.extinction_law = extinction_law
 
         self._pb_cache = {}
+        self._filt_idx = {}  # filter name -> index for O(1) lookup
         self._eff_wl_nm = np.full(len(self.filters), np.nan)
         self._bandwidth_m = np.full(len(self.filters), np.nan)
         self._pivot_wl_m = np.full(len(self.filters), np.nan)
+        self._dataset_labels = []
+        # Pre-cached extinction arrays (sorted, in Angstrom)
+        self._ext_wl_aa = [None] * len(self.filters)
+        self._ext_R = [None] * len(self.filters)
+        self._ext_den = np.full(len(self.filters), np.nan)
 
         for i, filt in enumerate(self.filters):
+            self._filt_idx[filt] = i
             pb = phoebe.get_passband(filt)
             self._pb_cache[filt] = pb
             self._eff_wl_nm[i] = pb.effwl
+            self._dataset_labels.append(
+                ("sedlc_" + filt).replace(":", "_").replace("-", "_")
+            )
             wl_m = np.asarray(pb.ptf_table["wl"], dtype=float)
             R = np.asarray(pb.ptf_table["fl"], dtype=float)
             ok = np.isfinite(wl_m) & np.isfinite(R) & (wl_m > 0) & (R > 0)
@@ -98,8 +116,15 @@ class PhoebeSED:
                 num = np.trapz(wl_m * R, wl_m)
                 den = np.trapz(R / wl_m, wl_m)
                 self._pivot_wl_m[i] = np.sqrt(num / den) if den > 0 else np.nan
+                # Pre-cache sorted extinction arrays in Angstrom
+                wl_aa = wl_m * 1e10
+                sort_idx = np.argsort(wl_aa)
+                wl_aa, R_sorted = wl_aa[sort_idx], np.clip(R[sort_idx], 0.0, None)
+                self._ext_wl_aa[i] = wl_aa
+                self._ext_R[i] = R_sorted
+                self._ext_den[i] = np.trapz(R_sorted, wl_aa)
 
-    def compute_sed(self, bundle, dist, ebv=0.0):
+    def compute_sed(self, bundle, dist, ebv=0.0, compute="phoebe01"):
         """
         Compute SED by adding temporary LC datasets to the bundle.
 
@@ -117,6 +142,8 @@ class PhoebeSED:
             Distance in parsec.
         ebv : float
             E(B-V) color excess for extinction.
+        compute : str
+            PHOEBE compute label (e.g., "phoebe01" or "ellcbackend").
 
         Returns
         -------
@@ -129,7 +156,7 @@ class PhoebeSED:
         original_enabled = {}
         for ds in list(bundle.datasets):
             try:
-                enabled = bundle.get_value(f"{ds}@enabled@phoebe01")
+                enabled = bundle.get_value(f"{ds}@enabled@{compute}")
                 original_enabled[ds] = enabled
                 if enabled:
                     bundle.disable_dataset(ds)
@@ -137,8 +164,8 @@ class PhoebeSED:
                 pass
 
         added_labels = []
-        for filt in self.filters:
-            label = ("sedlc_" + filt).replace(":", "_").replace("-", "_")
+        for i, filt in enumerate(self.filters):
+            label = self._dataset_labels[i]
             if label in bundle.datasets:
                 try:
                     bundle.remove_dataset("lc", dataset=label)
@@ -167,15 +194,15 @@ class PhoebeSED:
         bundle.set_value("distance", value=dist, unit=u.pc)
 
         try:
-            bundle.run_compute(compute="phoebe01")
+            bundle.run_compute(compute=compute)
         except Exception as e:
             logger.debug("PHOEBE SED compute failed: %s", e)
             self._restore_datasets(bundle, original_enabled, added_labels)
             return None
 
         fluxes_by_phase = np.full((len(phases), n_filt), np.nan, dtype=float)
-        for i, filt in enumerate(self.filters):
-            label = ("sedlc_" + filt).replace(":", "_").replace("-", "_")
+        for i in range(n_filt):
+            label = self._dataset_labels[i]
             try:
                 vals = bundle.get_value("fluxes", dataset=label, context="model")
                 vals = np.asarray(vals, dtype=float).ravel()
@@ -184,7 +211,7 @@ class PhoebeSED:
                 elif vals.size == 1:
                     fluxes_by_phase[:, i] = vals[0]
             except Exception as e:
-                logger.debug("Failed to extract fluxes for %s: %s", filt, e)
+                logger.debug("Failed to extract fluxes for %s: %s", self.filters[i], e)
 
         all_finite = np.all(np.isfinite(fluxes_by_phase), axis=0)
         bandfluxes = np.full(n_filt, np.nan, dtype=float)
@@ -223,22 +250,17 @@ class PhoebeSED:
         a_v = r_v * ebv
         result = bandfluxes.copy()
 
-        for i, filt in enumerate(self.filters):
+        for i in range(len(self.filters)):
             if not np.isfinite(bandfluxes[i]) or bandfluxes[i] <= 0:
                 continue
-            pb = self._pb_cache[filt]
-            wl_aa = np.asarray(pb.ptf_table["wl"], dtype=float) * 1e10
-            R = np.asarray(pb.ptf_table["fl"], dtype=float)
-            idx = np.argsort(wl_aa)
-            wl_aa, R = wl_aa[idx], R[idx]
-            R = np.clip(R, 0.0, None)
-
-            den = np.trapz(R, wl_aa)
-            if den <= 0:
+            wl_aa = self._ext_wl_aa[i]
+            R = self._ext_R[i]
+            den = self._ext_den[i]
+            if wl_aa is None or not np.isfinite(den) or den <= 0:
                 continue
 
-            if np.any(wl_aa < 910) or np.any(wl_aa > 60000):
-                logger.debug("Filter %s outside extinction valid range", filt)
+            if wl_aa[0] < 910 or wl_aa[-1] > 60000:
+                logger.debug("Filter %s outside extinction valid range", self.filters[i])
                 continue
 
             if self.extinction_law == "fitzpatrick99":
@@ -257,7 +279,7 @@ class PhoebeSED:
 
     def _bandflux_to_flam(self, bandflux_Wm2, filt):
         """Convert band-integrated flux (W/m^2) to f_lambda (erg/cm^2/s/A)."""
-        i = self.filters.index(filt)
+        i = self._filt_idx[filt]
         bw = self._bandwidth_m[i]
         if not np.isfinite(bw) or bw <= 0:
             return np.nan
@@ -267,7 +289,7 @@ class PhoebeSED:
 
     def _bandflux_to_fnu(self, bandflux_Wm2, filt):
         """Convert band-integrated flux (W/m^2) to f_nu (Jy)."""
-        i = self.filters.index(filt)
+        i = self._filt_idx[filt]
         bw = self._bandwidth_m[i]
         lam_piv = self._pivot_wl_m[i]
         if not np.isfinite(bw) or bw <= 0 or not np.isfinite(lam_piv):
@@ -288,6 +310,8 @@ class PhoebeSED:
         """Convert f_nu (Jy) to Vega magnitude using passband zero points."""
         if fnu_Jy <= 0 or not np.isfinite(fnu_Jy):
             return np.nan
+        if filt in _AB_NATIVE_FILTERS:
+            logger.debug("Filter %s is AB-native; Vegamag == ABmag", filt)
         zp = VEGA_ZP_JY.get(filt)
         if zp is None:
             logger.warning("No Vega zero point for %s; falling back to AB", filt)
