@@ -263,7 +263,7 @@ class EBMCMC:
             requiv2_init = self.bundle.get_value("requiv@secondary@component")
             teff1_init = self.bundle.get_value("teff@primary@component")
             teff2_init = self.bundle.get_value("teff@secondary@component")
-
+ 
         if 90 < incl_init < 180:
             incl_init = 180 - incl_init
 
@@ -273,7 +273,6 @@ class EBMCMC:
         sigma_floor = max(3e-4, 0.5*np.nanmedian(self.data_dict[first_lc]["sigmas"]))
 
         logit_cosi_init = logit(cosi_init)
-        logit_q_init = logit(q_init)
         log_Msum_init = np.log(Msum_init)
         log_rfrac_init = np.log(requiv2_init/requiv1_init)
         logit_rsumfrac_init = logit(rsumfrac_init)
@@ -281,23 +280,31 @@ class EBMCMC:
         log_tefffrac_init = np.log(teff2_init/teff1_init)
         log_dist_init = np.log(dist_init)
 
+        has_sed = "sed" in self.data_dict
+        has_rv = self.rvs
+
         init_vals = [u_q_init, log_Msum_init, log_teff1_init,
                     log_tefffrac_init, log_rfrac_init, logit_rsumfrac_init, logit_cosi_init,
                     ]
 
-        if not self.rvs:
-            eta_sigma_lc_init  = softplus_inv(0.3*sigma_floor)
+        # SED block (if present)
+        if has_sed:
             eta_alpha_sed_init = softplus_inv(0.3*loglike.ALPHA_FLOOR)
             init_vals.append(log_dist_init)
             init_vals.append(eta_alpha_sed_init)
-            init_vals.append(eta_sigma_lc_init)
 
-        else:
+        # LC jitter (always present)
+        eta_sigma_lc_init  = softplus_inv(0.3*sigma_floor)
+        init_vals.append(eta_sigma_lc_init)
+
+        # RV block (if present)
+        if has_rv:
             vgamma_init = self.bundle.get_value('vgamma@system')
             init_vals.append(vgamma_init)
             sigma_rv_jit_init = 1.0  # km/s
             eta_sigma_rv_init = softplus_inv(sigma_rv_jit_init)
             init_vals.append(eta_sigma_rv_init)
+
         if ecc:
             ecc_init = self.bundle.get_value("ecc@binary@component")
             init_vals.append(ecc_init)
@@ -310,9 +317,100 @@ class EBMCMC:
 
         return init_vals
 
+    def summarize_acceptance(self, sampler, label=""):
+        """
+        Log summary statistics of the per-walker acceptance fractions.
+        """
+        af = np.asarray(sampler.acceptance_fraction, dtype=float)
+        if af.size == 0 or not np.all(np.isfinite(af)):
+            logger.warning("%s acceptance fractions unavailable or non-finite.", label)
+            return None
 
-    def sample(self, ecc=True, nwalkers=32, nsteps=5000, threads=16, use_ellc=False,
-               lc_coeff=1, rv_coeff=1, sed_coeff=1, p0=None, prior_info=None):
+        summary = {
+            "mean": float(np.mean(af)),
+            "median": float(np.median(af)),
+            "min": float(np.min(af)),
+            "max": float(np.max(af)),
+            "frac_lt_0.05": float(np.mean(af < 0.05)),
+            "frac_lt_0.10": float(np.mean(af < 0.10)),
+        }
+
+        logger.info(
+            "%s acceptance fractions: mean=%.4f, median=%.4f, min=%.4f, max=%.4f, "
+            "frac<0.05=%.3f, frac<0.10=%.3f",
+            label,
+            summary["mean"],
+            summary["median"],
+            summary["min"],
+            summary["max"],
+            summary["frac_lt_0.05"],
+            summary["frac_lt_0.10"],
+        )
+        return summary
+
+
+    def get_default_moves(self, ndim, backend_iteration=0):
+        """
+        Default move mix.
+        """
+        if backend_iteration < 100:
+            return [
+                (StretchMove(a=1.6),            0.5),
+                (DEMove(gamma0=0.7, nsplits=2), 0.5),
+            ]
+        else:
+            gm = self.make_gaussian_move(ndim)
+            return [
+                (StretchMove(a=1.25),           0.65),
+                (DEMove(gamma0=0.5, nsplits=2), 0.25),
+                (gm,                            0.10),
+            ]
+
+
+    def get_fallback_moves(self, ndim):
+        """
+        Gentler fallback move mix for low-acceptance pilot runs.
+        """
+        gm = self.make_gaussian_move(ndim)
+        return [
+            (StretchMove(a=1.15),           0.50),
+            (DEMove(gamma0=0.4, nsplits=2), 0.20),
+            (gm,                            0.30),
+        ]
+
+
+    def build_sampler(self, nwalkers, ndim, backend, moves, logit_q_init, asini_init,
+                      period_init, log_dist_init, t0, log_Msum_init, teff1_init,
+                      ecc, use_ellc=False, pool=None, lc_coeff=1, rv_coeff=1,
+                      sed_coeff=1, prior_info=None):
+        """
+        Construct an emcee sampler with a specified move mix.
+        """
+        if prior_info is None:
+            prior_info = {}
+
+        sampler = emcee.EnsembleSampler(
+            nwalkers,
+            ndim,
+            loglike.lnprob,
+            args=[
+                self.data_dict, logit_q_init, asini_init, period_init, log_dist_init, t0,
+                log_Msum_init, teff1_init, self.C, ecc, self.rvs,
+                "sed" in self.data_dict, self.eclipsing,
+                use_ellc, lc_coeff, rv_coeff, sed_coeff,
+                self.compute_phases, self.A_obs, self.sigma_A, prior_info,
+                self.sed_method
+            ],
+            pool=pool,
+            backend=backend,
+            moves=moves,
+        )
+        return sampler
+
+
+    def sample(self, ecc=True, nwalkers=32, threads=16, use_ellc=False,
+               lc_coeff=1, rv_coeff=1, sed_coeff=1, p0=None, prior_info=None,
+               max_n=100000, thin=1, burn_in=1000):
         """
         Run the emcee ensemble sampler with automatic convergence checking.
 
@@ -322,8 +420,6 @@ class EBMCMC:
             Fit eccentricity and argument of periastron.
         nwalkers : int
             Number of emcee walkers.
-        nsteps : int
-            Not used directly; convergence is checked automatically.
         threads : int
             Number of parallel worker processes.
         use_ellc : bool
@@ -336,6 +432,12 @@ class EBMCMC:
             Additional prior specifications passed to ``lnprior``.
             Supported keys: ``t0``, ``gaia_dist``, ``q_from_rv``,
             ``asini_from_rv``, ``msum_cap``.
+        max_n : int
+            Maximum number of MCMC steps before stopping.
+        thin : int
+            Thinning factor for stored samples.
+        burn_in : int
+            Number of initial steps to skip before convergence checks.
 
         Returns
         -------
@@ -359,52 +461,39 @@ class EBMCMC:
         logit_rsumfrac_init = initial_guess[5]
         logit_cosi_init = initial_guess[6]
 
+        has_sed = "sed" in self.data_dict
+        has_rv = self.rvs
+
         log_dist_init = None
 
+        # Walk the initial_guess vector using the same layout as get_initial_values
         idx = 7
-        if self.rvs:
-            vgamma = initial_guess[idx]
-        else:
+        if has_sed:
             log_dist_init = initial_guess[idx]
-            alpha_sed = initial_guess[idx+1]
-            sigma_lc = initial_guess[idx+2]
-        if ecc and self.rvs:
-            ecc_init = initial_guess[idx+1]
-            per0_rad_init = initial_guess[idx+2]
+            idx += 2  # log_dist, eta_alpha_sed
+        idx += 1  # eta_sigma_lc (always)
+        if has_rv:
+            idx += 2  # vgamma, eta_sigma_rv
 
-        elif ecc:
-            ecc_init = initial_guess[idx+3]
-            per0_rad_init = initial_guess[idx+4]
-        
         cosi_init = sigmoid(logit_cosi_init)
         incl_init = np.degrees(np.arccos(cosi_init))
         u_q_init = initial_guess[0]
         q_init = 1.0 - sigmoid(u_q_init)
-        if q_init > 0.99:
-            logit_q_scale = 0.001
-        else:
-            logit_q_scale = 0.01
 
-        scales = [0.03, 0.02, 0.01, 0.01, 0.02, 0.012, 0.03]
+        # Build perturbation scales matching the parameter vector layout
+        scales = [0.03, 0.02, 0.01, 0.01, 0.02, 0.012, 0.03]  # core block
 
-        vgamma_scale = 2.0
-        eta_sigma_rv_scale = 0.2   # log-space-ish; keep moderate to avoid huge sigma_jit proposals
-        ecc_scale = 0.005
-        per0_scale = 0.02
-
-        if self.rvs:
-            scales.append(vgamma_scale)
-            scales.append(eta_sigma_rv_scale)
-        else:
-            scales.append(0.03) # distance
-            scales.append(0.25)  # eta_alpha_sed
-            scales.append(0.2)   # eta_sigma_lc
+        if has_sed:
+            scales.append(0.03)   # log_dist
+            scales.append(0.25)   # eta_alpha_sed
+        scales.append(0.2)       # eta_sigma_lc (always)
+        if has_rv:
+            scales.append(2.0)    # vgamma
+            scales.append(0.2)    # eta_sigma_rv
         if ecc:
-            scales.append(ecc_scale)
-            scales.append(per0_scale)
-
-        psi_t0_scale = 0.05
-        scales.append(psi_t0_scale)
+            scales.append(0.005)  # ecc
+            scales.append(0.02)   # per0
+        scales.append(0.05)       # psi_t0
 
         for _ in range(len(initial_guess) - len(scales)):
             scales.append(0.05)
@@ -438,12 +527,13 @@ class EBMCMC:
                  initargs=(self.data_dict, self.compute_phases, use_ellc,
                            self.sed_method, self.sed_units, self.per_filter_units,
                            self.sed_phases, self.extinction_law)) as pool:
-            sampler = self.run_sampler(nwalkers, ndim, backend, p0, logit_q_init, 
+            sampler = self.run_sampler(nwalkers, ndim, backend, p0, logit_q_init,
                                         asini_init, self.period, log_dist_init, self.t0, log_Msum_init, teff1_init,
-                                        ecc, 
+                                        ecc,
                                         use_ellc=use_ellc, pool=pool,
-                                        lc_coeff=lc_coeff, rv_coeff=rv_coeff, 
-                                        sed_coeff=sed_coeff, prior_info=prior_info)
+                                        lc_coeff=lc_coeff, rv_coeff=rv_coeff,
+                                        sed_coeff=sed_coeff, prior_info=prior_info,
+                                        max_n=max_n, thin=thin, burn_in=burn_in)
 
         logger.info("Sampling completed.")
 
@@ -459,82 +549,202 @@ class EBMCMC:
         cov = np.diag(sig**2)                       # (ndim, ndim) covariance
         return GaussianMove(cov=cov)
     
-    def run_sampler(self, nwalkers, ndim, backend, p0, logit_q_init, asini_init, period_init, log_dist_init, t0, log_Msum_init, teff1_init,
-                    ecc, use_ellc=False, pool=None, lc_coeff=1, rv_coeff=1, sed_coeff=1, prior_info=None):
+    def run_sampler(self, nwalkers, ndim, backend, p0, logit_q_init, asini_init, period_init,
+                log_dist_init, t0, log_Msum_init, teff1_init, ecc, use_ellc=False,
+                pool=None, lc_coeff=1, rv_coeff=1, sed_coeff=1, prior_info=None,
+                max_n=100000, thin=1, burn_in=1000):
+        """
+        Run emcee with an initial pilot phase and optional move-mix restart.
+
+        Notes
+        -----
+        The first 1000 draws are treated as a pilot/adaptation block. If the mean
+        walker acceptance fraction after that block is < 0.1, the sampler is
+        rebuilt with a gentler fallback move mix and resumed from the last walker
+        positions.
+
+        The autocorrelation-time checks below are used as a practical stopping
+        heuristic, not as the final scientific convergence assessment. Burn-in
+        selection and chain vetting are still expected to be reviewed manually.
+        """
         logger.info("Getting sampler...")
 
-        geom   = [4, 5, 6]   # log k, logit rsum, logit cosi
-        sedabs = [2, 3, 7]   # log T1, dlogT, log d
-        masses = [0, 1]      # logit q, log Msum
-        noise  = [8, 9]      # SED frac jitter, LC jitter
-
-        if backend.iteration < 100:
-            moves = [
-                (StretchMove(a=1.6),                      0.5),
-                (DEMove(gamma0=0.7, nsplits=2),           0.5),
-            ]
-        else:
-            logger.info('Using updated moves')
-            gm = self.make_gaussian_move(ndim)
-            moves = [
-                (StretchMove(a=1.25), 0.65),               # smaller a
-                (DEMove(gamma0=0.5, nsplits=2), 0.25),    # theory-ish gamma
-                (gm,                              0.10),
-            ]
-        
         if prior_info is None:
             prior_info = {}
 
-        sampler = emcee.EnsembleSampler(nwalkers, 
-                                        ndim, 
-                                        loglike.lnprob, 
-                                        args=[self.data_dict, logit_q_init, asini_init, period_init, log_dist_init, t0,
-                                              log_Msum_init, teff1_init, self.C, ecc, self.rvs, self.eclipsing,
-                                              use_ellc, lc_coeff, rv_coeff, sed_coeff,
-                                              self.compute_phases, self.A_obs, self.sigma_A, prior_info,
-                                              self.sed_method],
-                                        pool=pool,
-                                        backend=backend,
-                                        moves=moves)
+        pilot_ndraws = min(1000, max_n // 2)
+        acceptance_threshold = 0.10
 
-        logger.info("Running sampling with convergence checks...")
-        logger.debug("Sampler moves: %s", sampler._moves)
+        index = 0
+        autocorr = np.empty(max_n // (100 * thin))
+        old_tau = np.inf
 
+        # --------------------------------------------------
+        # Build initial sampler with default moves
+        # --------------------------------------------------
+        default_moves = self.get_default_moves(ndim, backend_iteration=backend.iteration)
+        sampler = self.build_sampler(
+            nwalkers=nwalkers,
+            ndim=ndim,
+            backend=backend,
+            moves=default_moves,
+            logit_q_init=logit_q_init,
+            asini_init=asini_init,
+            period_init=period_init,
+            log_dist_init=log_dist_init,
+            t0=t0,
+            log_Msum_init=log_Msum_init,
+            teff1_init=teff1_init,
+            ecc=ecc,
+            use_ellc=use_ellc,
+            pool=pool,
+            lc_coeff=lc_coeff,
+            rv_coeff=rv_coeff,
+            sed_coeff=sed_coeff,
+            prior_info=prior_info,
+        )
 
-        max_n = 100000  # Maximum number of steps
-        thin = 1       # Keep every 10th sample to reduce autocorrelation (adjust as needed)
-        burn_in = 2000  # Number of samples to discard as burn-in
-        index = 0       # To track the number of autocorrelation checks
-        autocorr = np.empty(max_n // (100 * thin))  # Adjusted for thinning
-        old_tau = np.inf  # Previous autocorrelation time for comparison
+        logger.info("Initial sampler moves: %s", sampler._moves)
 
-        # Run sampling up to `max_n` steps with periodic convergence checks
-        for sample in sampler.sample(p0, iterations=max_n, progress=True, thin=thin):
-            # Skip initial burn-in period
-            logger.debug('Sample fetched.')
-    
+        start_iter = backend.iteration
+        did_fallback_restart = False
+
+        # --------------------------------------------------
+        # Pilot phase
+        # --------------------------------------------------
+        if start_iter < pilot_ndraws:
+            pilot_to_run = pilot_ndraws - start_iter
+            logger.info(
+                "Running pilot phase for %d steps (target total iteration=%d).",
+                pilot_to_run, pilot_ndraws
+            )
+
+            for _ in sampler.sample(p0, iterations=pilot_to_run, progress=True, thin=thin):
+                pass
+
+            pilot_summary = self.summarize_acceptance(sampler, label="Pilot")
+
+            trigger_fallback = False
+            if pilot_summary is not None and pilot_summary["mean"] < acceptance_threshold:
+                trigger_fallback = True
+                logger.warning(
+                    "Pilot mean acceptance fraction %.4f < %.2f; switching to fallback move mix.",
+                    pilot_summary["mean"], acceptance_threshold
+                )
+
+            if trigger_fallback:
+                did_fallback_restart = True
+                p0_restart = backend.get_chain()[-1]
+
+                fallback_moves = self.get_fallback_moves(ndim)
+                sampler = self.build_sampler(
+                    nwalkers=nwalkers,
+                    ndim=ndim,
+                    backend=backend,
+                    moves=fallback_moves,
+                    logit_q_init=logit_q_init,
+                    asini_init=asini_init,
+                    period_init=period_init,
+                    log_dist_init=log_dist_init,
+                    t0=t0,
+                    log_Msum_init=log_Msum_init,
+                    teff1_init=teff1_init,
+                    ecc=ecc,
+                    use_ellc=use_ellc,
+                    pool=pool,
+                    lc_coeff=lc_coeff,
+                    rv_coeff=rv_coeff,
+                    sed_coeff=sed_coeff,
+                    prior_info=prior_info,
+                )
+                logger.info("Fallback sampler moves: %s", sampler._moves)
+
+                logger.info(
+                    "Running fallback assessment block for %d steps to evaluate whether acceptance improves.",
+                    pilot_ndraws
+                )
+
+                af_before = np.asarray(sampler.acceptance_fraction, dtype=float).copy()
+
+                for _ in sampler.sample(p0_restart, iterations=pilot_ndraws, progress=True, thin=thin):
+                    pass
+
+                af_after = np.asarray(sampler.acceptance_fraction, dtype=float)
+                delta_af = af_after - af_before
+
+                logger.info(
+                    "Fallback assessment: mean Δacceptance_fraction=%.4f, median Δ=%.4f",
+                    float(np.mean(delta_af)),
+                    float(np.median(delta_af)),
+                )
+                self.summarize_acceptance(sampler, label="Post-fallback")
+            else:
+                logger.info("Pilot acceptance looks acceptable; keeping default move mix.")
+
+        else:
+            logger.info(
+                "Backend already has %d iterations; skipping pilot phase.",
+                start_iter
+            )
+            self.summarize_acceptance(sampler, label="Existing chain")
+
+        # --------------------------------------------------
+        # Production phase with autocorrelation-based
+        # stopping heuristic
+        # --------------------------------------------------
+        logger.info("Running production sampling with autocorrelation-based stopping checks...")
+
+        remaining = max_n - backend.iteration
+        if remaining <= 0:
+            logger.warning(
+                "Backend iteration (%d) already >= max_n (%d); returning sampler.",
+                backend.iteration, max_n
+            )
+            return sampler
+
+        p0_production = backend.get_chain()[-1]
+
+        for _ in sampler.sample(p0_production, iterations=remaining, progress=True, thin=thin):
             if sampler.iteration < burn_in:
                 continue
-            
-            # Check convergence every 50 * thin steps
+
             if sampler.iteration % (50 * thin) == 0:
-                # Compute the autocorrelation time
                 try:
                     tau = sampler.get_autocorr_time(tol=0)
                 except emcee.autocorr.AutocorrError:
                     logger.warning("Autocorrelation time could not be estimated reliably.")
                     continue
 
-                autocorr[index] = np.mean(tau)  # Track average autocorrelation time
-                index += 1
+                if index < len(autocorr):
+                    autocorr[index] = np.mean(tau)
+                    index += 1
 
-                # Check convergence criteria
-                converged = np.all(tau * 50 < sampler.iteration)
-                converged &= np.all(np.abs(old_tau - tau) / tau < 0.01)
-                if converged:
-                    logger.info("Convergence reached.")
+                crit_50tau = np.all(tau * 50 < sampler.iteration)
+                crit_stable = np.all(np.abs(old_tau - tau) / tau < 0.01)
+                stopping_reached = crit_50tau and crit_stable
+
+                logger.info(
+                    "Stopping check at iter=%d: mean_tau=%.2f, max_tau=%.2f, "
+                    "criterion_50tau=%s, criterion_stable=%s",
+                    sampler.iteration,
+                    float(np.mean(tau)),
+                    float(np.max(tau)),
+                    crit_50tau,
+                    crit_stable,
+                )
+
+                if stopping_reached:
+                    logger.info("Autocorrelation-based stopping criterion reached.")
                     break
-                old_tau = tau  # Update old_tau for next comparison
+
+                old_tau = tau
+
+        final_summary = self.summarize_acceptance(sampler, label="Final")
+        if did_fallback_restart and final_summary is not None:
+            logger.info(
+                "Run finished after fallback restart. Final mean acceptance fraction: %.4f",
+                final_summary["mean"]
+            )
 
         return sampler
     

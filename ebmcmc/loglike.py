@@ -4,8 +4,9 @@ Log-likelihood, prior, and forward model for eclipsing binary MCMC fitting.
 Parameter vector layout
 -----------------------
 The MCMC sampler operates on an unconstrained parameter vector ``params``
-whose length depends on the mode (RV vs photometry-only) and whether
-eccentricity is fitted.
+whose length depends on the flags ``has_rv``, ``has_sed``, and ``ecc_bool``.
+The flags ``has_rv`` and ``has_sed`` are independent — both may be True
+simultaneously, enabling LC + SED + RV fitting.
 
 Core block (always indices 0-6):
     0  u_q               logit(1 - q)  — mass ratio via sigmoid transform
@@ -16,16 +17,16 @@ Core block (always indices 0-6):
     5  logit_rsumfrac     logit of (R1+R2)/a  (scaled by 1-eps)
     6  logit_cosi         logit(cos i)
 
-Branch at index 7 — depends on ``rv_bool``:
-
-  If rv_bool is True (RV mode):
-    7  vgamma             systemic velocity (km/s)
-    8  eta_sigma_rv       softplus^{-1}(sigma_jit) — RV jitter
-
-  If rv_bool is False (photometry + SED mode):
+SED block (if ``has_sed`` is True):
     7  log_dist            ln(distance) in parsec
     8  eta_alpha_sed       softplus^{-1}(alpha_sed) — SED fractional error
-    9  eta_sigma_lc        softplus^{-1}(sigma_lc) — LC additive jitter
+
+LC jitter (always present):
+    +0  eta_sigma_lc       softplus^{-1}(sigma_lc) — LC additive jitter
+
+RV block (if ``has_rv`` is True):
+    +0  vgamma             systemic velocity (km/s)
+    +1  eta_sigma_rv       softplus^{-1}(sigma_jit) — RV jitter
 
 Optional eccentricity block (if ``ecc_bool`` is True):
     +0  ecc                eccentricity [0, 1)
@@ -70,6 +71,11 @@ def softplus_inv(y):
     """Inverse of softplus: log(exp(y) - 1) for y > 0."""
     return np.log(np.expm1(y))
 
+def soft_density_cap(x, upper=2.3, sigma=0.3):
+    if x <= upper:
+        return 0.0
+    return -0.5 * ((x - upper) / sigma)**2
+
 def frac(x):
     """Return fractional part in [0,1)."""
     return x - np.floor(x)
@@ -80,6 +86,12 @@ def von_mises_logpdf(phi, mu, kappa):
     mu, phi in [0,1), kappa >= 0. Returns kappa*cos(2π(φ-μ)) (drops constants).
     """
     return kappa * np.cos(2*np.pi*(phi - mu))
+
+def log10_density_solar(mass_solar, radius_solar):
+    """log10 density in units of rho_sun."""
+    if (mass_solar <= 0) or (radius_solar <= 0):
+        return np.inf
+    return np.log10(mass_solar) - 3.0*np.log10(radius_solar)
 
 def interp_periodic_phase(phi_model, y_model, phi_obs):
     """
@@ -251,12 +263,15 @@ def _build_template_bundle(data_dict, model_phases, use_ellc, sed_method="binary
 
     return b, sed_obj, phoebe_sed_obj
 
-def _t0_from_phase_param(params, period, t0_ref, rv_bool, ecc_bool):
-    # core: 7 if rv_bool else 8
-    idx = 7 if rv_bool else 8
-    idx += 2  # nuisance block
+def _t0_from_phase_param(params, period, t0_ref, has_rv, has_sed, ecc_bool):
+    idx = 7
+    if has_sed:
+        idx += 2   # log_dist, eta_alpha_sed
+    idx += 1       # eta_sigma_lc (always present)
+    if has_rv:
+        idx += 2   # vgamma, eta_sigma_rv
     if ecc_bool:
-        idx += 2
+        idx += 2   # ecc, per0_rad
     psi_t0 = params[idx]
     phi0 = frac(psi_t0)
     t0 = t0_ref + phi0 * period
@@ -265,8 +280,9 @@ def _t0_from_phase_param(params, period, t0_ref, rv_bool, ecc_bool):
 
 def soft_barrier(x, lower=None, upper=None, k=10.0):
     """
-    Non-positive penalty; ~0 inside bounds, increasingly negative outside.
-    Uses stable softplus to avoid exp overflow warnings.
+    Smooth log-prior penalty that discourages values approaching or exceeding
+    specified bounds. The penalty grows gradually near the boundary and
+    increases roughly linearly once the bound is crossed.
     """
     pen = 0.0
     if lower is not None:
@@ -303,7 +319,7 @@ def logit(p):
 
 
 def lnprob(params, data_dict, u_q_init, asini_init, period_init, log_dist_init, t0_ref,
-           log_Msum_init, teff1_init, C, ecc_bool, rv_bool, eclipsing, use_ellc,
+           log_Msum_init, teff1_init, C, ecc_bool, has_rv, has_sed, eclipsing, use_ellc,
            lc_coeff, rv_coeff, sed_coeff, model_phases, A_obs, sigma_A,
            prior_info=None, sed_method="binarysed"):
     start_time = time.time()
@@ -311,12 +327,13 @@ def lnprob(params, data_dict, u_q_init, asini_init, period_init, log_dist_init, 
         prior_info = {}
 
     lp = lnprior(params, u_q_init, asini_init, period_init, log_dist_init, log_Msum_init, teff1_init, C,
-                 ecc_bool, rv_bool, eclipsing, A_obs, sigma_A, prior_info, t0_ref=t0_ref)
+                 ecc_bool, has_rv=has_rv, has_sed=has_sed, eclipsing=eclipsing,
+                 A_obs=A_obs, sigma_A=sigma_A, prior_info=prior_info, t0_ref=t0_ref)
     if not np.isfinite(lp):
         return -np.inf
 
-    ll = lnlikelihood(params, data_dict, C, period_init, t0_ref, ecc_bool, rv_bool, use_ellc,
-                      lc_coeff=lc_coeff, rv_coeff=rv_coeff, sed_coeff=sed_coeff,
+    ll = lnlikelihood(params, data_dict, C, period_init, t0_ref, ecc_bool, has_rv=has_rv, has_sed=has_sed,
+                      use_ellc=use_ellc, lc_coeff=lc_coeff, rv_coeff=rv_coeff, sed_coeff=sed_coeff,
                       model_phases=model_phases, sed_method=sed_method)
     if not np.isfinite(ll):
         return -np.inf
@@ -330,7 +347,7 @@ def lnprob(params, data_dict, u_q_init, asini_init, period_init, log_dist_init, 
 def sigmoid(z): 
         return 1/(1+np.exp(-z))
 
-def transform_params(params, period, rv_bool, ecc_bool, log_dist_init=None, t0_ref=0.0):
+def transform_params(params, period, has_rv, has_sed, ecc_bool, t0_ref=0.0):
     """
     Decode the unconstrained sampler vector into physical binary parameters.
 
@@ -340,12 +357,12 @@ def transform_params(params, period, rv_bool, ecc_bool, log_dist_init=None, t0_r
         MCMC parameter vector (see module docstring for layout).
     period : float
         Orbital period in days (held fixed).
-    rv_bool : bool
-        True if radial-velocity mode.
+    has_rv : bool
+        True if radial-velocity data is present.
+    has_sed : bool
+        True if SED data is present.
     ecc_bool : bool
         True if eccentricity is being fitted.
-    log_dist_init : float, optional
-        Not used; kept for API compatibility.
     t0_ref : float, optional
         Reference epoch for t0 computation (BJD).
 
@@ -362,22 +379,20 @@ def transform_params(params, period, rv_bool, ecc_bool, log_dist_init=None, t0_r
     log_rfrac    = params[4]
     logit_rsumfrac = params[5]
     logit_cosi   = params[6]
-    
+
     idx = 7
 
-    if not rv_bool:
-        log_dist = params[idx]
-        idx += 1
-        dist = np.exp(log_dist)
+    dist = None
+    if has_sed:
+        log_dist = params[idx]; dist = np.exp(log_dist); idx += 1
+        eta_alpha_sed = params[idx]; idx += 1
 
-    # Then branch exactly like initial_guess
-    if rv_bool:
-        vgamma = params[idx]
-        eta_sigma_rv = params[idx + 1]
-    else:
-        eta_alpha_sed = params[idx]
-        eta_sigma_lc  = params[idx + 1]
-    idx += 2
+    eta_sigma_lc = params[idx]; idx += 1  # always present
+
+    vgamma = None
+    if has_rv:
+        vgamma = params[idx]; idx += 1
+        eta_sigma_rv = params[idx]; idx += 1
 
     # ecc/per0
     if ecc_bool:
@@ -411,15 +426,11 @@ def transform_params(params, period, rv_bool, ecc_bool, log_dist_init=None, t0_r
     requiv1 = r1frac * a
     requiv2 = r2frac * a
 
-    if rv_bool:
-        return q, Msum, teff1, teff2, requiv1, requiv2, a, incl, None, vgamma, ecc_val, per0_rad
-
-    else:
-        return q, Msum, teff1, teff2, requiv1, requiv2, a, incl, dist, None, ecc_val, per0_rad
+    return q, Msum, teff1, teff2, requiv1, requiv2, a, incl, dist, vgamma, ecc_val, per0_rad
 
 
 def lnprior(params, u_q_init, asini_init, period, log_dist_init, log_Msum_init, teff1_init, C,
-            ecc_bool, rv_bool, eclipsing, A_obs, sigma_A, prior_info=None, t0_ref=0.0):
+            ecc_bool, has_rv, has_sed, eclipsing, A_obs, sigma_A, prior_info=None, t0_ref=0.0):
     """
     Compute the log-prior for the binary model.
 
@@ -447,8 +458,10 @@ def lnprior(params, u_q_init, asini_init, period, log_dist_init, log_Msum_init, 
         Unused legacy constant (kept for API compatibility).
     ecc_bool : bool
         Whether eccentricity is fitted.
-    rv_bool : bool
-        Whether in RV mode.
+    has_rv : bool
+        Whether radial-velocity data is present.
+    has_sed : bool
+        Whether SED data is present.
     eclipsing : bool
         If True, apply sin(i) prior; if False, apply non-eclipse constraint.
     A_obs : float
@@ -469,13 +482,13 @@ def lnprior(params, u_q_init, asini_init, period, log_dist_init, log_Msum_init, 
         prior_info = {}
 
     # === use transformed params with t0_ref ===
-    tp = transform_params(params, period, rv_bool, ecc_bool, t0_ref=t0_ref)
+    tp = transform_params(params, period, has_rv=has_rv, has_sed=has_sed, ecc_bool=ecc_bool, t0_ref=t0_ref)
     if not isinstance(tp, tuple):
         return -np.inf
     q, Msum, teff1, teff2, requiv1, requiv2, a, incl, dist, vgamma, ecc_val, per0_rad = tp
 
     t0, phi0 = _t0_from_phase_param(params, period, t0_ref=t0_ref,
-                                    rv_bool=rv_bool, ecc_bool=ecc_bool)
+                                    has_rv=has_rv, has_sed=has_sed, ecc_bool=ecc_bool)
 
     # Check priors
     if not (0 < q <= 1):
@@ -505,6 +518,16 @@ def lnprior(params, u_q_init, asini_init, period, log_dist_init, log_Msum_init, 
         return -np.inf
     # NOTE: Alternative non-eclipse constraint using arccos(rsumfrac) was considered but replaced by soft_barrier
 
+    M1 = Msum / (1.0 + q)
+    M2 = q * M1
+
+    logrho1 = log10_density_solar(M1, requiv1)
+    logrho2 = log10_density_solar(M2, requiv2)
+
+    # Broad sanity prior: only penalize absurdly high densities
+    log_prior_density1 = soft_density_cap(logrho1, upper=2.3, k=3.0)
+    log_prior_density2 = soft_density_cap(logrho2, upper=2.3, k=3.0)
+
     sigma_teff1 = 700
     log_prior_teff1 = -0.5 * ((teff1 - teff1_init) / sigma_teff1)**2
 
@@ -529,7 +552,7 @@ def lnprior(params, u_q_init, asini_init, period, log_dist_init, log_Msum_init, 
     log_prior_msum = 0
 
     log_prior_a = 0
-    if not rv_bool:
+    if has_sed:
         G     = 2942.2062175044193
         a_init = (np.exp(log_Msum_init) * period**2 * G / (4*np.pi**2))**(1/3)
         a_from_msum = (Msum * period**2 * G / (4*np.pi**2))**(1/3)
@@ -552,8 +575,8 @@ def lnprior(params, u_q_init, asini_init, period, log_dist_init, log_Msum_init, 
         if (t0_lo is not None) or (t0_hi is not None):
             log_prior_t0 += soft_barrier(t0, lower=t0_lo, upper=t0_hi, k=8.0)
 
-    # --- Distance prior: ONLY if not rv_bool ---
-    if (not rv_bool) and ("gaia_dist" in prior_info):
+    # --- Distance prior: ONLY if has_sed ---
+    if has_sed and ("gaia_dist" in prior_info):
         dist0   = prior_info["gaia_dist"]["dist0"]
         dist_lo = prior_info["gaia_dist"]["dist_lo"]
         dist_hi = prior_info["gaia_dist"]["dist_hi"]
@@ -581,8 +604,8 @@ def lnprior(params, u_q_init, asini_init, period, log_dist_init, log_Msum_init, 
         log_prior_dist_max = 0.0
 
     log_prior_alpha = 0
-    if not rv_bool:
-        eta_alpha_sed = params[8]
+    if has_sed:
+        eta_alpha_sed = params[8]  # log_dist at 7, eta_alpha_sed at 8 when has_sed
         tilde = 1/(1+np.exp(-eta_alpha_sed))                 # (0,1)
         alpha_sed = ALPHA_FLOOR + (ALPHA_CAP - ALPHA_FLOOR) * tilde
 
@@ -618,6 +641,7 @@ def lnprior(params, u_q_init, asini_init, period, log_dist_init, log_Msum_init, 
         log_prior_msum_upper = soft_barrier(Msum, upper=15.0, k=3.0)
 
     log_prior_total = (log_prior_q + log_prior_asini + log_prior_roche1 + log_prior_roche2 +
+                        log_prior_density1 + log_prior_density2 +
                        log_prior_a + log_prior_msum + log_prior_msum_upper + log_prior_dist +
                        log_prior_dist_max + log_prior_amplitude + log_prior_noneclipse +
                        log_prior_t0 + log_prior_alpha + log_prior_teff1)
@@ -627,7 +651,7 @@ def lnprior(params, u_q_init, asini_init, period, log_dist_init, log_Msum_init, 
 
     return log_prior_total
 
-def forward_model(params, data_dict, C, period, t0, ecc_bool, rv_bool, use_ellc,
+def forward_model(params, data_dict, C, period, t0, ecc_bool, has_rv, has_sed, use_ellc,
                   model_phases=None, sed_method="binarysed"):
     """
     Run PHOEBE (or ellc) forward model and return predicted observables.
@@ -646,8 +670,10 @@ def forward_model(params, data_dict, C, period, t0, ecc_bool, rv_bool, use_ellc,
         Time of superior conjunction (BJD).
     ecc_bool : bool
         Whether eccentricity is fitted.
-    rv_bool : bool
-        Whether in RV mode.
+    has_rv : bool
+        Whether radial-velocity data is present.
+    has_sed : bool
+        Whether SED data is present.
     use_ellc : bool
         If True, use the ellc backend instead of PHOEBE.
     model_phases : dict or array_like or None
@@ -660,7 +686,7 @@ def forward_model(params, data_dict, C, period, t0, ecc_bool, rv_bool, use_ellc,
         where any element may be None if not applicable. Returns
         (None, None, None, None) on failure.
     """
-    q, Msum, teff1, teff2, requiv1, requiv2, a, incl, dist, vgamma, ecc_val, per0_rad = transform_params(params, period, rv_bool, ecc_bool)
+    q, Msum, teff1, teff2, requiv1, requiv2, a, incl, dist, vgamma, ecc_val, per0_rad = transform_params(params, period, has_rv=has_rv, has_sed=has_sed, ecc_bool=ecc_bool)
 
     if not _WORKER_STATE:  # fallback for single-process/no-pool runs
         _pool_init(data_dict, model_phases, use_ellc, sed_method=sed_method)
@@ -688,7 +714,7 @@ def forward_model(params, data_dict, C, period, t0, ecc_bool, rv_bool, use_ellc,
     b.set_value("incl@binary@component", incl)
     b.set_value("t0_supconj@binary@component", t0)
 
-    if rv_bool:
+    if has_rv:
         b.set_value("vgamma@system", vgamma)
 
     if ecc_bool:
@@ -772,7 +798,7 @@ def forward_model(params, data_dict, C, period, t0, ecc_bool, rv_bool, use_ellc,
             y_pred_rv_secondary = y2
                 
     sed_model = None
-    if (not rv_bool) and ("sed" in data_dict):
+    if has_sed and ("sed" in data_dict):
         if np.isnan(data_dict["sed"]["dist"]):
             logger.warning("No distance available; leaving SED out of the fit.")
             sed_model = None
@@ -810,7 +836,7 @@ def forward_model(params, data_dict, C, period, t0, ecc_bool, rv_bool, use_ellc,
             
     return y_pred_lc, y_pred_rv_primary, y_pred_rv_secondary, sed_model 
 
-def lnlikelihood(params, data_dict, C, period, t0_ref, ecc_bool, rv_bool, use_ellc, model_phases,
+def lnlikelihood(params, data_dict, C, period, t0_ref, ecc_bool, has_rv, has_sed, use_ellc, model_phases,
                  lc_coeff=1, rv_coeff=1, sed_coeff=1, sed_method="binarysed"):
     """
     Compute the log-likelihood for the binary model.
@@ -833,8 +859,10 @@ def lnlikelihood(params, data_dict, C, period, t0_ref, ecc_bool, rv_bool, use_el
         Reference epoch (BJD).
     ecc_bool : bool
         Whether eccentricity is fitted.
-    rv_bool : bool
-        Whether in RV mode.
+    has_rv : bool
+        Whether radial-velocity data is present.
+    has_sed : bool
+        Whether SED data is present.
     use_ellc : bool
         If True, use the ellc backend.
     model_phases : dict or array_like or None
@@ -848,16 +876,16 @@ def lnlikelihood(params, data_dict, C, period, t0_ref, ecc_bool, rv_bool, use_el
         Log-likelihood value, or -inf on failure.
     """
     q, Msum, teff1, teff2, requiv1, requiv2, a, incl, dist, vgamma, ecc_val, per0_rad = transform_params(
-        params, period, rv_bool, ecc_bool, t0_ref=t0_ref
+        params, period, has_rv=has_rv, has_sed=has_sed, ecc_bool=ecc_bool, t0_ref=t0_ref
     )
 
     t0, phi0 = _t0_from_phase_param(params, period, t0_ref=t0_ref,
-                                    rv_bool=rv_bool, ecc_bool=ecc_bool)
+                                    has_rv=has_rv, has_sed=has_sed, ecc_bool=ecc_bool)
 
     try:
         y_pred_lc, y_pred_rv_primary, y_pred_rv_secondary, sed_model = forward_model(
-            params, data_dict, C, period, t0, ecc_bool, rv_bool, use_ellc,
-            model_phases=model_phases, sed_method=sed_method,
+            params, data_dict, C, period, t0, ecc_bool, has_rv=has_rv, has_sed=has_sed,
+            use_ellc=use_ellc, model_phases=model_phases, sed_method=sed_method,
         )
         if y_pred_lc is None:
             return -np.inf
@@ -865,16 +893,19 @@ def lnlikelihood(params, data_dict, C, period, t0_ref, ecc_bool, rv_bool, use_el
         logger.debug("Forward model exception: %s", e)
         return -np.inf
 
-    # Noise / nuisance params live at [8,9] regardless; meaning depends on rv_bool
-    idx = 7 if rv_bool else 8   # start of nuisance block
-    if rv_bool:
+    # Noise / nuisance params — walk indices dynamically
+    idx = 7
+    eta_alpha_sed = None
+    if has_sed:
+        # log_dist at idx, eta_alpha_sed at idx+1
+        eta_alpha_sed = params[idx + 1]
+        idx += 2
+    eta_sigma_lc = params[idx]  # always present
+    idx += 1
+    eta_sigma_rv = None
+    if has_rv:
+        # vgamma at idx, eta_sigma_rv at idx+1
         eta_sigma_rv = params[idx + 1]
-        eta_alpha_sed = None
-        eta_sigma_lc = None
-    else:
-        eta_alpha_sed = params[idx]
-        eta_sigma_lc  = params[idx + 1]
-        eta_sigma_rv = None
         
     lc_datasets = []
     rv_dataset = None
@@ -895,11 +926,8 @@ def lnlikelihood(params, data_dict, C, period, t0_ref, ecc_bool, rv_bool, use_el
         sigma_lc_obs = data_dict[dataset]["sigmas"]
         
         # map to physical jitters with floors
-        if eta_sigma_lc is not None:
-            jitter =softplus(eta_sigma_lc)    # additive (relative flux)
-            var = sigma_lc_obs**2 + jitter**2
-        else:
-            var = sigma_lc_obs**2
+        jitter = softplus(eta_sigma_lc)    # additive (relative flux)
+        var = sigma_lc_obs**2 + jitter**2
         chi2_lc += np.sum((data_lc - y_pred) ** 2 / var) + np.sum(np.log(2*np.pi*var))
         N_lc_points += len(data_lc)
 
@@ -966,7 +994,7 @@ def lnlikelihood(params, data_dict, C, period, t0_ref, ecc_bool, rv_bool, use_el
     chi2_sed = 0.0
     N_sed_points = 0
 
-    if (not rv_bool) and ("sed" in data_dict) and (sed_model is not None):
+    if has_sed and ("sed" in data_dict) and (sed_model is not None):
         data_sed = data_dict["sed"]["fluxes"]
         sigma_sed = data_dict["sed"]["flux_errs"]
         alpha_sed   = ALPHA_FLOOR + (ALPHA_CAP - ALPHA_FLOOR) * (1.0 / (1.0 + np.exp(-eta_alpha_sed)))

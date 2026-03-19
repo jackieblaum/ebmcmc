@@ -141,21 +141,23 @@ def test_interp_periodic_too_few_points():
 # ---- _t0_from_phase_param ----
 
 def test_t0_from_phase_param_rv():
-    """RV mode: psi_t0 at index 7+2=9 (no ecc)."""
-    params = np.zeros(10)
-    params[9] = 0.25  # psi_t0 = 0.25
+    """RV mode (no SED): psi_t0 at index 7+1+2=10 (no ecc)."""
+    # 7 core + 1 eta_sigma_lc + 2 RV + 1 psi_t0 = 11
+    params = np.zeros(11)
+    params[10] = 0.25  # psi_t0 = 0.25
     t0, phi0 = _t0_from_phase_param(params, period=2.0, t0_ref=100.0,
-                                     rv_bool=True, ecc_bool=False)
+                                     has_rv=True, has_sed=False, ecc_bool=False)
     assert np.isclose(phi0, 0.25)
     assert np.isclose(t0, 100.5)  # 100 + 0.25*2
 
 
 def test_t0_from_phase_param_photom_ecc():
-    """Photometry mode with ecc: psi_t0 at index 8+2+2=12."""
+    """SED mode with ecc (no RV): psi_t0 at index 7+2+1+2=12."""
+    # 7 core + 2 SED + 1 eta_sigma_lc + 2 ecc + 1 psi_t0 = 13
     params = np.zeros(13)
     params[12] = 0.5
     t0, phi0 = _t0_from_phase_param(params, period=1.0, t0_ref=50.0,
-                                     rv_bool=False, ecc_bool=True)
+                                     has_rv=False, has_sed=True, ecc_bool=True)
     assert np.isclose(phi0, 0.5)
     assert np.isclose(t0, 50.5)
 
@@ -163,9 +165,9 @@ def test_t0_from_phase_param_photom_ecc():
 # ---- transform_params basic sanity ----
 
 def test_transform_params_rv_mode():
-    """Smoke test: transform_params returns a 12-tuple in RV mode."""
-    # 7 core + 2 RV nuisance + 1 psi_t0 = 10
-    params = np.zeros(10)
+    """Smoke test: transform_params returns a 12-tuple in RV mode (no SED)."""
+    # 7 core + 1 eta_sigma_lc + 2 RV + 1 psi_t0 = 11
+    params = np.zeros(11)
     params[0] = 0.0      # u_q -> q = 0.5
     params[1] = np.log(2.0)  # Msum = 2
     params[2] = np.log(5500)
@@ -173,7 +175,11 @@ def test_transform_params_rv_mode():
     params[4] = np.log(0.8)  # rfrac
     params[5] = 0.0          # logit_rsumfrac -> ~0.5*(1-eps)
     params[6] = 0.0          # logit_cosi -> cosi = 0.5
-    result = transform_params(params, period=2.0, rv_bool=True, ecc_bool=False)
+    # params[7] = eta_sigma_lc (zero is fine)
+    # params[8] = vgamma = 0
+    # params[9] = eta_sigma_rv = 0
+    # params[10] = psi_t0 = 0
+    result = transform_params(params, period=2.0, has_rv=True, has_sed=False, ecc_bool=False)
     assert len(result) == 12
     q, Msum, teff1, teff2, r1, r2, a, incl, dist, vgamma, ecc_val, per0 = result
     assert np.isclose(q, 0.5, atol=1e-4)
@@ -183,8 +189,8 @@ def test_transform_params_rv_mode():
 
 
 def test_transform_params_photom_ecc():
-    """Smoke test: photometry mode with eccentricity."""
-    # 7 core + 1 log_dist + 2 nuisance + 2 ecc + 1 psi_t0 = 13
+    """Smoke test: SED mode with eccentricity (no RV)."""
+    # 7 core + 2 SED + 1 eta_sigma_lc + 2 ecc + 1 psi_t0 = 13
     params = np.zeros(13)
     params[0] = 0.0
     params[1] = np.log(2.0)
@@ -194,10 +200,39 @@ def test_transform_params_photom_ecc():
     params[5] = 0.0
     params[6] = 0.0
     params[7] = np.log(300)  # log_dist
+    # params[8] = eta_alpha_sed = 0
+    # params[9] = eta_sigma_lc = 0
     params[10] = 0.1         # ecc
     params[11] = 1.0         # per0_rad
-    result = transform_params(params, period=2.0, rv_bool=False, ecc_bool=True)
+    result = transform_params(params, period=2.0, has_rv=False, has_sed=True, ecc_bool=True)
     q, Msum, teff1, teff2, r1, r2, a, incl, dist, vgamma, ecc_val, per0 = result
     assert np.isclose(dist, 300.0, rtol=1e-6)
     assert vgamma is None
     assert np.isclose(ecc_val, 0.1)
+
+
+def test_transform_params_all_three():
+    """Smoke test: LC+SED+RV mode with eccentricity."""
+    # 7 core + 2 SED + 1 eta_sigma_lc + 2 RV + 2 ecc + 1 psi_t0 = 15
+    params = np.zeros(15)
+    params[0] = 0.0
+    params[1] = np.log(2.0)
+    params[2] = np.log(5500)
+    params[3] = np.log(0.9)
+    params[4] = np.log(0.8)
+    params[5] = 0.0
+    params[6] = 0.0
+    params[7] = np.log(500)   # log_dist
+    # params[8] = eta_alpha_sed = 0
+    # params[9] = eta_sigma_lc = 0
+    params[10] = 15.0          # vgamma
+    # params[11] = eta_sigma_rv = 0
+    params[12] = 0.05          # ecc
+    params[13] = 2.0           # per0_rad
+    # params[14] = psi_t0 = 0
+    result = transform_params(params, period=2.0, has_rv=True, has_sed=True, ecc_bool=True)
+    q, Msum, teff1, teff2, r1, r2, a, incl, dist, vgamma, ecc_val, per0 = result
+    assert np.isclose(dist, 500.0, rtol=1e-6)
+    assert np.isclose(vgamma, 15.0)
+    assert np.isclose(ecc_val, 0.05)
+    assert np.isclose(per0, 2.0)
