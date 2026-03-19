@@ -4,7 +4,7 @@ setup(
     name="ebmcmc",
     version="0.1.0",
     author="Jackie Blaum",
-    author_email="jrblaum@berkeley.edu",
+    author_email="jackie.blaum@gmail.com",
     description="MCMC fitting of eclipsing binary star systems",
     long_description=open("README.md").read(),
     long_description_content_type="text/markdown",

@@ -21,5 +21,5 @@ from .loglike import (
 
 __version__ = "0.1.0"
 __author__ = "Jacqueline Blaum"
-__email__ = "jrblaum@berkeley.edu"
+__email__ = "jackie.blaum@gmail.com"
 __description__ = "MCMC fitting of eclipsing binary star systems"
