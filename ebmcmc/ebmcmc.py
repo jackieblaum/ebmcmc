@@ -1,59 +1,142 @@
 import phoebe
-import pymc as pm
 import numpy as np
 import os
-import pytensor.tensor as pt
-import scipy.optimize
-import arviz as az
-import pyphot
-from datetime import datetime
-import matplotlib.pyplot as plt
-import xarray as xr
-import pickle
+import emcee
 import logging
-from tqdm import tqdm
-import binarysed
-from ebmcmc.loglike import Loglike
+from ebmcmc import loglike
+from ebmcmc.loglike import sigmoid, logit, softplus_inv
+from emcee.moves import StretchMove, DEMove, GaussianMove
+from multiprocessing import Pool
+from dustmaps.edenhofer2023 import Edenhofer2023Query
+from astropy.coordinates import SkyCoord
+import astropy.units as u
 
-
+logger = logging.getLogger(__name__)
+    
 class EBMCMC:
     """
-    A class for performing Markov Chain Monte Carlo (MCMC) sampling on binary star systems using PHOEBE and pymc.
+    MCMC sampler for eclipsing (and ellipsoidal) binary star systems.
+
+    Wraps PHOEBE forward modelling with an emcee ensemble sampler.
+    Supports joint fitting of light curves, radial velocities, and
+    broadband SEDs, with learned per-dataset jitter parameters.
+
+    Parameters
+    ----------
+    bundle : phoebe.Bundle
+        Pre-configured PHOEBE bundle with datasets attached.
+    trace_dir : str, optional
+        Base directory for saving MCMC chains.
+    sed : dict, optional
+        SED data dictionary with keys ``RA``, ``DEC``, ``dist``,
+        ``wavelengths``, ``fluxes``, ``flux_errs``.
+    datasets : list of str, optional
+        Subset of bundle datasets to fit. Defaults to all.
+    eclipsing : bool
+        If True, apply sin(i) prior; if False, apply non-eclipse constraints.
+    ecc : bool
+        If True, fit eccentricity and argument of periastron.
+    prev_run_dir : str, optional
+        Path to a previous run directory to resume from.
+    new_run_dir : str, optional
+        Name for a new run sub-directory under ``trace_dir``.
+    sed_method : str, optional
+        SED forward modeling method: "binarysed" (default) or "phoebe".
+    sed_units : str, optional
+        Target SED units when sed_method="phoebe": "flam", "fnu_Jy", "ABmag", "Vegamag".
+    per_filter_units : dict, optional
+        Per-filter unit overrides, e.g., {"2MASS:J": "Vegamag"}.
+    sed_phases : list of float, optional
+        Orbital phases for PHOEBE SED computation. Default: [0.25].
+    extinction_law : str, optional
+        Extinction law: "fitzpatrick99" (default) or "ccm89".
     """
 
     def __init__(
-        self, bundle, trace_dir=None, sed=None, datasets=None, eclipsing=True, ecc=True
+        self, bundle, trace_dir=None, sed=None, datasets=None, eclipsing=True, ecc=True,
+        prev_run_dir=None, new_run_dir=None, sed_method="binarysed", sed_units="flam",
+        per_filter_units=None, sed_phases=None, extinction_law="fitzpatrick99",
     ):
         self.bundle = bundle
         self.sed = sed
-        self.model = None
+        self.sed_method = sed_method
+        self.sed_units = sed_units
+        self.per_filter_units = per_filter_units
+        self.sed_phases = sed_phases
+        self.extinction_law = extinction_law
         self.min_time = 1e9
         self.max_time = 0
+        self.rvs = False
+        self.compute_phases = None
         self.data_dict = self.create_data_dict(datasets=datasets)
+        self.A_obs, self.sigma_A = self.estimate_ell_amp()
         self.eclipsing = eclipsing
         self.ecc = ecc
         self.trace_dir = trace_dir
-        self.likelihood_computations = 0
-
+        self.C = 0
+        self.period = None
+        self.t0 = None
         self.initialize_bundle()
         self.initialize_logging()
+        self.set_run_dir(prev_run_dir, new_run_dir)
 
     def initialize_bundle(self):
         """Initializes PHOEBE bundle values."""
+        teff1 = self.bundle.get_value('teff@primary@component')
+        teff2 = self.bundle.get_value('teff@secondary@component')
+        requiv1 = self.bundle.get_value('requiv@primary@component')
+        requiv2 = self.bundle.get_value('requiv@secondary@component')
+        requiv1_max = self.bundle.get_value('requiv_max@primary@component')
+        requiv2_max = self.bundle.get_value('requiv_max@secondary@component')
+        if requiv1 > requiv1_max:
+            self.bundle.set_value('requiv@primary@component', value=requiv1_max-0.05)
+        if requiv2 > requiv2_max:
+            self.bundle.set_value('requiv@primary@component', value=requiv1_max-0.05) # change the primary so the secondary shifts down
+            rsumfrac = self.bundle.get_value('requivsumfrac@binary@component')
+            self.bundle.set_value('requivsumfrac@binary@component', value=rsumfrac - 0.03)
+        # TODO: Re-enable gravity darkening and per-star LD coefficients for hot stars (T>8000K)
+
+        if self.bundle.get_value('incl@binary@component') > 89:
+            self.bundle.set_value('incl@binary@component', value=85)
+
         self.bundle.set_value_all("ld_mode", "lookup")
+        self.bundle.set_value("eclipse_method", value="native")
+        self.bundle.run_compute(compute='phoebe01', model='latest')
+        pblums = self.bundle.compute_pblums(compute='phoebe01', model='latest')
         self.bundle.set_value_all("pblum_mode", "component-coupled")
 
+        self.compute_phases = {}
+        for dataset in self.bundle.datasets:
+            if not dataset.startswith('rv') and self.bundle[f'{dataset}@dataset@mask_enabled'].value:
+                self.bundle.set_value(f'pblum@primary@{dataset}', pblums[f'pblum@primary@{dataset}'].value)
+                times = self.bundle.get_value(f"times@{dataset}@dataset")
+                if not dataset.endswith('unbinned') and len(times)==200:
+                    self.compute_phases = self.bundle.to_phase(times)
+
+            # Only LCs, only enabled
+            if not dataset.startswith("lc"):
+                continue
+            if not self.bundle[f"{dataset}@dataset@mask_enabled"].value:
+                continue
+            if not dataset.endswith("unbinned"):
+                continue
+
+            # Grab compute_phases directly from the dataset
+            phases = self.bundle.get_value(f"compute_phases@{dataset}")
+
+            # Safety cleanup (usually already clean, but cheap insurance)
+            phases = np.mod(np.asarray(phases, dtype=float), 1.0)
+            phases = np.unique(phases)
+            phases.sort()
+
+            self.compute_phases[dataset] = phases
+
     def initialize_logging(self):
-        """Initializes logging for PHOEBE and pymc."""
-        phoebe_logger = phoebe.logger(
-            clevel=None, flevel="CRITICAL", filename="phoebe.log"
-        )
+        """Initializes logging for PHOEBE."""
+        phoebe_logger = phoebe.logger(clevel="WARNING", flevel="DEBUG", filename="phoebe.log")
         phoebe_logger.propagate = False
         phoebe.progressbars_off()
-
-        pymc_logger = logging.getLogger("pymc")
-        pymc_logger.setLevel(logging.INFO)
-        pymc_logger.propagate = True
+        logging.getLogger().setLevel(logging.WARNING)
 
     def create_data_dict(self, datasets=None):
         data_dict = {}
@@ -62,426 +145,630 @@ class EBMCMC:
 
         for dataset in datasets:
             if dataset.startswith("lc"):
-                data_dict[dataset] = self.extract_light_curve_data(dataset)
+                if self.bundle.get_value(f"{dataset}@enabled@phoebe01"):
+                    logger.info('Adding dataset %s', dataset)
+                    data_dict[dataset] = self.extract_light_curve_data(dataset)
             elif dataset.startswith("rv"):
+                logger.info('Adding dataset %s', dataset)
                 data_dict[dataset] = self.extract_rv_data(dataset)
+                self.rvs = True
             else:
                 raise ValueError(f"Unrecognized dataset type: {dataset}")
 
         if self.sed:
+            edenhofer = Edenhofer2023Query(integrated=True)
+            RA = self.sed["RA"]
+            DEC = self.sed["DEC"]
+            dist = self.sed["dist"]
+            coord = SkyCoord(ra=RA * u.degree,
+                            dec=DEC * u.degree,
+                            distance=dist * u.pc,
+                            frame="icrs")
+            A_base = edenhofer(coord)
+            R_V = 3.1
+            ebv = A_base/R_V
+            self.sed["ebv"] = ebv
+
+            if self.sed_method == "phoebe" and "filters" not in self.sed:
+                raise ValueError("sed_method='phoebe' requires 'filters' key in sed dict")
+
             data_dict["sed"] = self.sed
 
         return data_dict
 
     def extract_light_curve_data(self, dataset):
         times = self.bundle.get_value(f"times@{dataset}@dataset")
-        self.min_time, self.max_time = min(self.min_time, np.min(times)), max(
-            self.max_time, np.max(times)
-        )
+        phases = self.bundle.to_phase(times)  # ← precompute once
+        self.min_time = min(self.min_time, np.min(times))
+        self.max_time = max(self.max_time, np.max(times))
         return {
-            "data": self.bundle.get_value(f"fluxes@{dataset}@dataset"),
+            "data":   self.bundle.get_value(f"fluxes@{dataset}@dataset"),
             "sigmas": self.bundle.get_value(f"sigmas@{dataset}"),
-            "times": times,
+            "times":  times,
+            "phases": phases,                      # ← keep here
+            "passband": self.bundle.get_value(f"passband@{dataset}")  # optional, handy
         }
 
     def extract_rv_data(self, dataset):
         primary_times = self.bundle.get_value(f"times@{dataset}@primary@dataset")
         secondary_times = self.bundle.get_value(f"times@{dataset}@secondary@dataset")
+        primary_sigmas = self.bundle.get_value(f"sigmas@{dataset}@primary")
+        secondary_sigmas = self.bundle.get_value(f"sigmas@{dataset}@secondary")
+        if primary_sigmas is None:
+            primary_sigmas = np.ones_like(self.bundle.get_value(f"rvs@primary@{dataset}@dataset"), dtype=float)
+        if secondary_sigmas is None:
+            secondary_sigmas = np.ones_like(self.bundle.get_value(f"rvs@secondary@{dataset}@dataset"), dtype=float)
+
         return {
             "primary": self.bundle.get_value(f"rvs@primary@{dataset}@dataset"),
             "secondary": self.bundle.get_value(f"rvs@secondary@{dataset}@dataset"),
-            "primary_sigmas": self.bundle.get_value(f"sigmas@{dataset}@primary"),
-            "secondary_sigmas": self.bundle.get_value(f"sigmas@{dataset}@secondary"),
+            "primary_sigmas": primary_sigmas,
+            "secondary_sigmas": secondary_sigmas,
             "primary_times": primary_times,
             "secondary_times": secondary_times,
         }
 
-    def define_model(self):
-        period_init = self.bundle.get_value("period@binary@component")
+    def estimate_ell_amp(self):
+        # use first LC with a mask enabled
+        ds = next(ds for ds in self.data_dict if ds.startswith("lc"))
+        y  = self.data_dict[ds]["data"]
+        sig = self.data_dict[ds]["sigmas"]
+        m  = np.isfinite(y) & np.isfinite(sig)
+        y  = y[m]
+        # robust half peak-to-peak
+        p5, p95 = np.percentile(y, [5, 95])
+        A_obs = 0.5*(p95 - p5)
+        # uncertainty — very generous
+        sigma_A = max(0.5*A_obs, 5*np.median(sig[m]))
+        return max(A_obs, 1e-5), sigma_A
+
+    def get_initial_values(self, ecc):
+        """
+        Build the initial MCMC parameter vector from bundle values.
+
+        Parameters
+        ----------
+        ecc : bool
+            Whether to include eccentricity parameters.
+
+        Returns
+        -------
+        list of float
+            Initial parameter vector (see ``loglike`` module docstring
+            for the full layout).
+        """
+        self.period = self.bundle.get_value("period@binary@component")
+        self.t0 = self.bundle.get_value("t0_supconj@binary@component")
         m1 = self.bundle.get_value("mass@primary@component")
         m2 = self.bundle.get_value("mass@secondary@component")
+        Msum_init = m1 + m2
         q_init = self.bundle.get_value("q@binary@component")
+        q_init = np.clip(q_init, 1e-6, 1-1e-6)
+        u_q_init = logit(1.0 - q_init)
         incl_init = self.bundle.get_value("incl@binary@component")
-        asini_init = self.bundle.get_value("asini@binary@component")
-        requivsumfrac_init = self.bundle.get_value("requivsumfrac@binary@component")
-        teffratio_init = self.bundle.get_value("teffratio@binary@component")
-        teff_secondary_init = self.bundle.get_value("teff@secondary@component")
-        ecc_init = self.bundle.get_value("ecc@binary@component")
-        per0_init = self.bundle.get_value("per0@binary@component")
-        pblums_init = [
-            self.bundle.get_value(f"pblum@primary@{dataset}@dataset")
-            for dataset in self.bundle.datasets
-            if dataset.startswith("lc")
-        ]
+        rsumfrac_init = self.bundle.get_value("requivsumfrac@binary@component")
+        if self.sed is not None:
+            dist_init = self.sed["dist"]
+        else:
+            dist_init = self.bundle.get_value("distance") / 3.086e16 # m to pc
 
         if q_init > 1:
             q_init = m1 / m2
-            requiv_secondary_init = self.bundle.get_value("requiv@primary@component")
+            requiv1_init = self.bundle.get_value("requiv@secondary@component")
+            requiv2_init = self.bundle.get_value("requiv@primary@component")
+            teff1_init = self.bundle.get_value("teff@secondary@component")
+            teff2_init = self.bundle.get_value("teff@primary@component")
         else:
-            requiv_secondary_init = self.bundle.get_value("requiv@secondary@component")
+            requiv1_init = self.bundle.get_value("requiv@primary@component")
+            requiv2_init = self.bundle.get_value("requiv@secondary@component")
+            teff1_init = self.bundle.get_value("teff@primary@component")
+            teff2_init = self.bundle.get_value("teff@secondary@component")
+ 
+        if 90 < incl_init < 180:
+            incl_init = 180 - incl_init
 
-        print("Initial Parameter Values:")
-        print(f"  Period (period_init): {period_init}")
-        print(f"  Mass of Primary (m1): {m1}")
-        print(f"  Mass of Secondary (m2): {m2}")
-        print(f"  Mass Ratio (q_init): {q_init}")
-        print(f"  Inclination (incl_init): {incl_init}")
-        print(f"  Semi-major Axis x Sine Inclination (asini_init): {asini_init}")
-        print(f"  Radius Sum Fraction (requivsumfrac_init): {requivsumfrac_init}")
-        print(f"  Temperature Ratio (teffratio_init): {teffratio_init}")
-        print(f"  Secondary Temperature (teff_secondary_init): {teff_secondary_init}")
-        print(f"  Eccentricity (ecc_init): {ecc_init}")
-        print(f"  Periastron (per0_init): {per0_init}")
-        print(f"  Primary Luminosity Ratios (pblums_init): {pblums_init}")
+        incl_rad = np.deg2rad(incl_init)
+        cosi_init = np.clip(np.cos(incl_rad), 0.0, 1.0)
+        first_lc = next(ds for ds in self.data_dict if ds.startswith("lc"))
+        sigma_floor = max(3e-4, 0.5*np.nanmedian(self.data_dict[first_lc]["sigmas"]))
 
+        logit_cosi_init = logit(cosi_init)
+        log_Msum_init = np.log(Msum_init)
+        log_rfrac_init = np.log(requiv2_init/requiv1_init)
+        logit_rsumfrac_init = logit(rsumfrac_init)
+        log_teff1_init = np.log(teff1_init)
+        log_tefffrac_init = np.log(teff2_init/teff1_init)
+        log_dist_init = np.log(dist_init)
 
-        with pm.Model() as self.model:
-            # Define priors
-            period = pm.TruncatedNormal(
-                "period@binary@component",
-                lower=1e-6,
-                mu=period_init,
-                sigma=period_init * 0.1,
-                initval=period_init
-            )
-            # period = pm.Normal(
-            #     "period@binary@component",
-            #     mu=period_init,
-            #     sigma=period_init * 0.1,
-            #     initval=period_init
-            # )
+        has_sed = "sed" in self.data_dict
+        has_rv = self.rvs
 
-            # Set the time of superior conjunction prior as a Gaussian with bounds constrained by the min and max times in the dataset
-            t0_supconj_init = self.bundle.get_value('t0_supconj@binary@component')
-            t0_lower = self.min_time
-            t0_upper = self.max_time
-            t0_supconj = pm.Uniform('t0_supconj@binary@component', lower=t0_lower, upper=t0_upper, initval=t0_supconj_init)
-            
-            q = pm.TruncatedNormal(
-                "q@binary@component", lower=0.1, upper=1, mu=q_init, sigma=q_init * 0.1, initval=q_init
-            )
-            # q = pm.Uniform(
-            #     "q@binary@component", lower=0.1, upper=1, initval=q_init
-            # )
-            incl_lower = 1
-            incl = pm.Uniform(
-                "incl@binary@component", lower=incl_lower, upper=90, initval=incl_init
-            )
+        init_vals = [u_q_init, log_Msum_init, log_teff1_init,
+                    log_tefffrac_init, log_rfrac_init, logit_rsumfrac_init, logit_cosi_init,
+                    ]
 
-            min_stellar_radius = 0.3
-            asini_lower = min_stellar_radius*2*np.sin(incl_lower*(2*np.pi)/360)
-            asini = pm.TruncatedNormal(
-                "asini@binary@component",
-                lower=asini_lower,
-                mu=asini_init,
-                sigma=asini_init * 0.1,
-                initval=asini_init
-            )
-            # asini = pm.Normal(
-            #     "asini@binary@component",
-            #     mu=asini_init,
-            #     sigma=asini_init * 0.1,
-            #     initval=asini_init
-            # )
-            sma = asini / np.sin(incl * (2 * np.pi) / 360)
+        # SED block (if present)
+        if has_sed:
+            eta_alpha_sed_init = softplus_inv(0.3*loglike.ALPHA_FLOOR)
+            init_vals.append(log_dist_init)
+            init_vals.append(eta_alpha_sed_init)
 
-            mass_primary = (
-                39.478418
-                * (asini / np.sin(incl * (2 * np.pi) / 360)) ** 3
-                / (period**2 * (q + 1))
-            )
-            mass_secondary = (
-                39.478418
-                * (asini / np.sin(incl * (2 * np.pi) / 360)) ** 3
-                / (period**2 * (1 / q + 1))
-            )
-            
-            requiv_lower = np.sqrt(2942.206217504419328179210424423218 * 9.319541 * mass_secondary/(10**5.5))
-            requiv_upper = np.sqrt(2942.206217504419328179210424423218 * 9.319541 * mass_secondary/(10**3.5))
-            requiv_secondary = pm.Uniform(
-                "requiv@secondary@component",
-                lower=0.15,
-                upper=requiv_upper,
-                initval=requiv_secondary_init
-            )
-            print(f'Init requiv: {requiv_secondary_init}')
+        # LC jitter (always present)
+        eta_sigma_lc_init  = softplus_inv(0.3*sigma_floor)
+        init_vals.append(eta_sigma_lc_init)
 
-            # Set the lower bound for requivsumfrac such that the primary radius also results in logg<5
-            r1r2_a_lower = ((2942.206217504419328179210424423218 * 9.319541 * mass_primary / 10**5)**(1/2) + requiv_secondary)/sma
-            # Set the upper bound for requivsumfrac such that the primary radius also results in logg>3.5
-            r1r2_a_upper = ((2942.206217504419328179210424423218 * 9.319541 * mass_primary / 10**3.5)**(1/2) + requiv_secondary)/sma
+        # RV block (if present)
+        if has_rv:
+            vgamma_init = self.bundle.get_value('vgamma@system')
+            init_vals.append(vgamma_init)
+            sigma_rv_jit_init = 1.0  # km/s
+            eta_sigma_rv_init = softplus_inv(sigma_rv_jit_init)
+            init_vals.append(eta_sigma_rv_init)
 
-            # Set the requivsumfrac prior for eclipsing systems
-            if self.eclipsing:
-                # Set the lower bound based on the condition to see an eclipse
-                r1r2_a_lower_eclipse = np.sin((90-incl)*(2*np.pi)/360)
-                # If the lower bound from the eclipse condition is greater than the lower bound from logg<5, use the eclipse condition
-                maximum_r1r2_a_lower = pm.Deterministic('minimum_value', pt.maximum(r1r2_a_lower_eclipse, r1r2_a_lower))
+        if ecc:
+            ecc_init = self.bundle.get_value("ecc@binary@component")
+            init_vals.append(ecc_init)
+            per0_init = self.bundle.get_value("per0@binary@component")
+            per0_rad = np.deg2rad(per0_init)
+            init_vals.append(per0_rad)
 
-                # print('Debug: r1r2_a_lower from eclipse condition:', maximum_r1r2_a_lower)
-                # print('Debug: r1r2_a_upper:', r1r2_a_upper)
-                # Set requivsumfrac prior as a Gaussian with bounds
-                requivsumfrac = pm.Uniform('requivsumfrac@binary@component', lower=maximum_r1r2_a_lower, upper=r1r2_a_upper, initval=requivsumfrac_init)
+        psi_t0_init = 0.0
+        init_vals.append(psi_t0_init)
 
-            # Set the requivsumfrac prior for non-eclipsing systems
-            else:
-                # Set requivsumfrac prior as a Gaussian with bounds
-                # requivsumfrac = pm.Uniform('requivsumfrac@binary@component', lower=r1r2_a_lower, upper=r1r2_a_upper, initval=requivsumfrac_init)
-                requivsumfrac = pm.TruncatedNormal('requivsumfrac@binary@component', lower=1e-10, mu=requivsumfrac_init, sigma=0.3*requivsumfrac_init, initval=requivsumfrac_init)
-                # requivsumfrac = pm.Uniform('requivsumfrac@binary@component', lower=1e-10, upper=1, initval=requivsumfrac_init)
+        return init_vals
 
-            teff_secondary = pm.Uniform(
-                "teff@secondary@component",
-                lower=2800,
-                upper=50000,
-                initval=teff_secondary_init,
-            )
-
-            # Set the temperature ratio prior as a Gaussian with bounds. Lower bound is based on the maximum possible primary temperature
-            teffratio = pm.Uniform(
-                "teffratio@binary@component",
-                lower=teff_secondary/50000,
-                upper=1.2,
-                initval=teffratio_init,
-            )
-
-            if self.ecc:
-                ecc = pm.Beta("ecc@binary@component", alpha=1, beta=5, initval=ecc_init)
-                per0_rad = pm.VonMises(
-                    "per0@rad", mu=per0_init * (2 * np.pi) / 360, kappa=1,
-                )
-                per0 = pm.Deterministic(
-                    "per0@binary@component", 360 / (2 * np.pi) * per0_rad
-                )
-
-            sigma_lnf = pm.Uniform("sigma_lnf", lower=-15, upper=-1)
-
-            fit_params = [
-                teffratio,
-                incl,
-                requivsumfrac,
-                requiv_secondary,
-                q,
-                t0_supconj, 
-                asini,
-                teff_secondary,
-                period,
-                sigma_lnf
-            ]
-
-            if self.ecc:
-                fit_params.extend([ecc, per0])
-
-            for i, pblum in enumerate(pblums_init):
-                # fit_params.append(
-                #     pm.TruncatedNormal(
-                #         f"pblum@primary@{i}@dataset", lower=1e-10, mu=pblum, sigma=0.01
-                #     )
-                # )
-                fit_params.append(
-                    pm.Normal(
-                        f"pblum@primary@{i}@dataset", mu=pblum, sigma=0.01, initval=pblum
-                    )
-                )
-            
-            loglike = Loglike(self.data_dict)
-            params = pt.as_tensor_variable(fit_params)
-
-            # params = pt.stack(fit_params)
-            pm.Potential("like", loglike(params))
-
-    def sample(self, ndraws=1000, cores=4, tune_steps=1000, target_accept=0.9):
-        if self.model is None:
-            self.define_model()
-
-        with self.model:
-            trace = pm.sample(
-                draws=ndraws, cores=cores, tune=tune_steps, target_accept=target_accept
-            )
-            self.save_trace(trace)
-
-        return trace
-
-    def save_trace(self, trace):
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        run_dir = os.path.join(self.trace_dir, f"run_{timestamp}")
-        os.makedirs(run_dir, exist_ok=True)
-
-        for chain_idx in range(trace.posterior.chain.size):
-            filename = f"trace_chain_{chain_idx}.nc"
-            az.to_netcdf(trace.sel(chain=chain_idx), os.path.join(run_dir, filename))
-
-    # Other functions remain the same, adjusted for updated syntax where needed
-
-
-    def load_full_trace_states(self, truncate=False):
+    def summarize_acceptance(self, sampler, label=""):
         """
-        Loads the full trace state from previously saved runs.
-
-        Args:
-            truncate (bool, optional): If True, truncates the chains to the shortest length if they are of different lengths. Defaults to False.
-
-        Returns:
-            list or az.InferenceData: A list of individual chains or a combined InferenceData object, depending on the number of chains.
+        Log summary statistics of the per-walker acceptance fractions.
         """
-        if not self.trace_dir:
-            raise ValueError("Trace directory not provided")
-
-        subdirs = [
-            d
-            for d in os.listdir(self.trace_dir)
-            if os.path.isdir(os.path.join(self.trace_dir, d))
-        ]
-        sorted_dirs = sorted(
-            subdirs, key=lambda x: os.path.getctime(os.path.join(self.trace_dir, x))
-        )
-
-        all_chains = []
-        for subdir in sorted_dirs:
-            chain_list = []
-            indices = []
-            for trace_file in os.listdir(os.path.join(self.trace_dir, subdir)):
-                if trace_file.endswith(".nc"):
-                    chain_idx = int(trace_file.split("_")[-1].split(".")[0])
-                    indices.append(chain_idx)
-                    single_chain = az.from_netcdf(
-                        os.path.join(self.trace_dir, subdir, trace_file)
-                    )
-                    chain_list.append(single_chain.posterior)
-
-            # Sort chains by indices to ensure correct order
-            sorted_indices = np.argsort(indices)
-            chain_list_sorted = [chain_list[i] for i in sorted_indices]
-            all_chains.append(chain_list_sorted)
-
-        if not all_chains:
+        af = np.asarray(sampler.acceptance_fraction, dtype=float)
+        if af.size == 0 or not np.all(np.isfinite(af)):
+            logger.warning("%s acceptance fractions unavailable or non-finite.", label)
             return None
 
-        # Check if all chains have the same number of draws
-        total_draws = np.array(
-            [chain.sizes["draw"] for chain_set in all_chains for chain in chain_set]
+        summary = {
+            "mean": float(np.mean(af)),
+            "median": float(np.median(af)),
+            "min": float(np.min(af)),
+            "max": float(np.max(af)),
+            "frac_lt_0.05": float(np.mean(af < 0.05)),
+            "frac_lt_0.10": float(np.mean(af < 0.10)),
+        }
+
+        logger.info(
+            "%s acceptance fractions: mean=%.4f, median=%.4f, min=%.4f, max=%.4f, "
+            "frac<0.05=%.3f, frac<0.10=%.3f",
+            label,
+            summary["mean"],
+            summary["median"],
+            summary["min"],
+            summary["max"],
+            summary["frac_lt_0.05"],
+            summary["frac_lt_0.10"],
         )
-        if len(set(total_draws)) > 1:
-            inference_data_list = [
-                az.InferenceData(posterior=chain) for chain in all_chains[-1]
-            ]
-            if truncate:
-                print(
-                    f"Chains have different lengths. Truncating to shortest chain length."
-                )
-                return self.truncate_chains(inference_data_list)
-            print(
-                f"Chains have different lengths. Returning individual traces for each chain in the most recent directory."
-            )
-            return inference_data_list
+        return summary
 
-        # Combine chains into a single InferenceData object with multiple chains
-        if len(all_chains) > 1:
-            combined_chains = [
-                xr.concat(chain_set, dim="draw") for chain_set in zip(*all_chains)
+
+    def get_default_moves(self, ndim, backend_iteration=0):
+        """
+        Default move mix.
+        """
+        if backend_iteration < 100:
+            return [
+                (StretchMove(a=1.6),            0.5),
+                (DEMove(gamma0=0.7, nsplits=2), 0.5),
             ]
-            inference_data_list = [
-                az.InferenceData(posterior=chain.expand_dims("chain"))
-                for chain in combined_chains
-            ]
-            combined_inference_data = az.concat(inference_data_list, dim="chain")
-            return combined_inference_data
         else:
-            inference_data_list = [
-                az.InferenceData(posterior=chain) for chain in all_chains[0]
+            gm = self.make_gaussian_move(ndim)
+            return [
+                (StretchMove(a=1.25),           0.65),
+                (DEMove(gamma0=0.5, nsplits=2), 0.25),
+                (gm,                            0.10),
             ]
-            combined_inference_data = az.concat(inference_data_list, dim="chain")
-            return combined_inference_data
 
-    def check_convergence(self, trace):
-        """Checks the convergence of the trace using R-hat values."""
-        rhats = az.rhat(trace)
-        return (rhats < 1.05).all()
 
-    def posterior_predictive_checks(self, trace):
+    def get_fallback_moves(self, ndim):
         """
-        Performs posterior predictive checks (PPC) on the trace.
-
-        Args:
-            trace (az.InferenceData or pm.backends.base.MultiTrace): The trace object containing the posterior samples.
+        Gentler fallback move mix for low-acceptance pilot runs.
         """
-        print("Posterior predictive check...")
+        gm = self.make_gaussian_move(ndim)
+        return [
+            (StretchMove(a=1.15),           0.50),
+            (DEMove(gamma0=0.4, nsplits=2), 0.20),
+            (gm,                            0.30),
+        ]
 
-        posterior = trace.posterior if isinstance(trace, az.InferenceData) else trace
-        num_chains = len(posterior.chain)
-        num_draws = len(posterior.draw)
-        num_samples = 50  # Number of samples to draw for PPC
 
-        # Generate random indices for subsampling
-        chain_indices = np.random.randint(0, num_chains, size=num_samples)
-        draw_indices = np.random.randint(0, num_draws, size=num_samples)
+    def build_sampler(self, nwalkers, ndim, backend, moves, logit_q_init, asini_init,
+                      period_init, log_dist_init, t0, log_Msum_init, teff1_init,
+                      ecc, use_ellc=False, pool=None, lc_coeff=1, rv_coeff=1,
+                      sed_coeff=1, prior_info=None):
+        """
+        Construct an emcee sampler with a specified move mix.
+        """
+        if prior_info is None:
+            prior_info = {}
 
-        model_outputs = []
+        sampler = emcee.EnsembleSampler(
+            nwalkers,
+            ndim,
+            loglike.lnprob,
+            args=[
+                self.data_dict, logit_q_init, asini_init, period_init, log_dist_init, t0,
+                log_Msum_init, teff1_init, self.C, ecc, self.rvs,
+                "sed" in self.data_dict, self.eclipsing,
+                use_ellc, lc_coeff, rv_coeff, sed_coeff,
+                self.compute_phases, self.A_obs, self.sigma_A, prior_info,
+                self.sed_method
+            ],
+            pool=pool,
+            backend=backend,
+            moves=moves,
+        )
+        return sampler
 
-        # Prepare SED plot if SED data is present
-        if "sed" in self.data_dict:
-            fig, ax = plt.subplots(nrows=1, ncols=1, figsize=(18, 8))
 
-        # Iterate through sampled chains and draws
-        for idx in range(num_samples):
-            chain_idx = chain_indices[idx]
-            draw_idx = draw_indices[idx]
+    def sample(self, ecc=True, nwalkers=32, threads=16, use_ellc=False,
+               lc_coeff=1, rv_coeff=1, sed_coeff=1, p0=None, prior_info=None,
+               max_n=100000, thin=1, burn_in=1000):
+        """
+        Run the emcee ensemble sampler with automatic convergence checking.
 
-            # Set parameters in PHOEBE from posterior samples
-            for param in posterior.data_vars:
-                param_value = (
-                    posterior[param].sel(chain=chain_idx, draw=draw_idx).values
+        Parameters
+        ----------
+        ecc : bool
+            Fit eccentricity and argument of periastron.
+        nwalkers : int
+            Number of emcee walkers.
+        threads : int
+            Number of parallel worker processes.
+        use_ellc : bool
+            Use the ellc backend instead of PHOEBE.
+        lc_coeff, rv_coeff, sed_coeff : float
+            Reserved weighting coefficients (currently unused).
+        p0 : array_like, optional
+            Initial walker positions (nwalkers x ndim).
+        prior_info : dict, optional
+            Additional prior specifications passed to ``lnprior``.
+            Supported keys: ``t0``, ``gaia_dist``, ``q_from_rv``,
+            ``asini_from_rv``, ``msum_cap``.
+        max_n : int
+            Maximum number of MCMC steps before stopping.
+        thin : int
+            Thinning factor for stored samples.
+        burn_in : int
+            Number of initial steps to skip before convergence checks.
+
+        Returns
+        -------
+        emcee.EnsembleSampler
+            The sampler object with chains accessible via ``get_chain()``.
+        """
+
+        if not use_ellc:
+            phoebe.multiprocessing_set_nprocs(threads)
+
+        initial_guess = self.get_initial_values(ecc)
+        if initial_guess is None:
+            raise ValueError("Initial values for parameters cannot be found.")
+        
+        logit_q_init = initial_guess[0]
+        log_Msum_init = initial_guess[1]
+        log_teff1_init = initial_guess[2]
+        teff1_init = np.exp(log_teff1_init)
+        log_tefffrac_init = initial_guess[3]
+        log_rfrac_init = initial_guess[4]
+        logit_rsumfrac_init = initial_guess[5]
+        logit_cosi_init = initial_guess[6]
+
+        has_sed = "sed" in self.data_dict
+        has_rv = self.rvs
+
+        log_dist_init = None
+
+        # Walk the initial_guess vector using the same layout as get_initial_values
+        idx = 7
+        if has_sed:
+            log_dist_init = initial_guess[idx]
+            idx += 2  # log_dist, eta_alpha_sed
+        idx += 1  # eta_sigma_lc (always)
+        if has_rv:
+            idx += 2  # vgamma, eta_sigma_rv
+
+        cosi_init = sigmoid(logit_cosi_init)
+        incl_init = np.degrees(np.arccos(cosi_init))
+        u_q_init = initial_guess[0]
+        q_init = 1.0 - sigmoid(u_q_init)
+
+        # Build perturbation scales matching the parameter vector layout
+        scales = [0.03, 0.02, 0.01, 0.01, 0.02, 0.012, 0.03]  # core block
+
+        if has_sed:
+            scales.append(0.03)   # log_dist
+            scales.append(0.25)   # eta_alpha_sed
+        scales.append(0.2)       # eta_sigma_lc (always)
+        if has_rv:
+            scales.append(2.0)    # vgamma
+            scales.append(0.2)    # eta_sigma_rv
+        if ecc:
+            scales.append(0.005)  # ecc
+            scales.append(0.02)   # per0
+        scales.append(0.05)       # psi_t0
+
+        for _ in range(len(initial_guess) - len(scales)):
+            scales.append(0.05)
+        scales = np.array(scales)
+
+        G_solar = 2942.2062175044193  # same constant you use there
+        Msum_init = np.exp(log_Msum_init)
+        a_init = (Msum_init * (self.period**2) * G_solar / (4*np.pi**2))**(1/3)  # in R_sun
+        asini_init = a_init * np.sin(np.radians(incl_init))
+
+        filename = '{}/mcmc.h5'.format(self.run_dir)
+        backend = emcee.backends.HDFBackend(filename)
+
+        try:
+            n_steps_completed = backend.iteration
+            ndim = backend.get_chain().shape[2]
+        except (OSError, KeyError, AttributeError):
+            logger.info("Starting fresh.")
+            backend.reset(nwalkers, len(initial_guess))
+            ndim = len(initial_guess)
+            if p0 is None:
+                p0 = [initial_guess + scales * np.random.randn(ndim) for _ in range(nwalkers)]
+        else:
+            logger.info("Sampler starting with %d steps completed.", n_steps_completed)
+            p0 = backend.get_chain()[-1]
+
+        if prior_info is None:
+            prior_info = {}
+
+        with Pool(processes=threads, initializer=loglike._pool_init,
+                 initargs=(self.data_dict, self.compute_phases, use_ellc,
+                           self.sed_method, self.sed_units, self.per_filter_units,
+                           self.sed_phases, self.extinction_law)) as pool:
+            sampler = self.run_sampler(nwalkers, ndim, backend, p0, logit_q_init,
+                                        asini_init, self.period, log_dist_init, self.t0, log_Msum_init, teff1_init,
+                                        ecc,
+                                        use_ellc=use_ellc, pool=pool,
+                                        lc_coeff=lc_coeff, rv_coeff=rv_coeff,
+                                        sed_coeff=sed_coeff, prior_info=prior_info,
+                                        max_n=max_n, thin=thin, burn_in=burn_in)
+
+        logger.info("Sampling completed.")
+
+        return sampler
+
+    def make_gaussian_move(self, ndim):
+        # tiny local jiggle; smaller on the touchy geometry dims
+        sig = np.full(ndim, 0.015, dtype=float)    # per-dim stddev
+        touchy = [4, 5, 6]                          # log_rfrac, logit_rsum, logit_cosi
+        for i in touchy:
+            if i < ndim:
+                sig[i] = 0.008
+        cov = np.diag(sig**2)                       # (ndim, ndim) covariance
+        return GaussianMove(cov=cov)
+    
+    def run_sampler(self, nwalkers, ndim, backend, p0, logit_q_init, asini_init, period_init,
+                log_dist_init, t0, log_Msum_init, teff1_init, ecc, use_ellc=False,
+                pool=None, lc_coeff=1, rv_coeff=1, sed_coeff=1, prior_info=None,
+                max_n=100000, thin=1, burn_in=1000):
+        """
+        Run emcee with an initial pilot phase and optional move-mix restart.
+
+        Notes
+        -----
+        The first 1000 draws are treated as a pilot/adaptation block. If the mean
+        walker acceptance fraction after that block is < 0.1, the sampler is
+        rebuilt with a gentler fallback move mix and resumed from the last walker
+        positions.
+
+        The autocorrelation-time checks below are used as a practical stopping
+        heuristic, not as the final scientific convergence assessment. Burn-in
+        selection and chain vetting are still expected to be reviewed manually.
+        """
+        logger.info("Getting sampler...")
+
+        if prior_info is None:
+            prior_info = {}
+
+        pilot_ndraws = min(1000, max_n // 2)
+        acceptance_threshold = 0.10
+
+        index = 0
+        autocorr = np.empty(max_n // (100 * thin))
+        old_tau = np.inf
+
+        # --------------------------------------------------
+        # Build initial sampler with default moves
+        # --------------------------------------------------
+        default_moves = self.get_default_moves(ndim, backend_iteration=backend.iteration)
+        sampler = self.build_sampler(
+            nwalkers=nwalkers,
+            ndim=ndim,
+            backend=backend,
+            moves=default_moves,
+            logit_q_init=logit_q_init,
+            asini_init=asini_init,
+            period_init=period_init,
+            log_dist_init=log_dist_init,
+            t0=t0,
+            log_Msum_init=log_Msum_init,
+            teff1_init=teff1_init,
+            ecc=ecc,
+            use_ellc=use_ellc,
+            pool=pool,
+            lc_coeff=lc_coeff,
+            rv_coeff=rv_coeff,
+            sed_coeff=sed_coeff,
+            prior_info=prior_info,
+        )
+
+        logger.info("Initial sampler moves: %s", sampler._moves)
+
+        start_iter = backend.iteration
+        did_fallback_restart = False
+
+        # --------------------------------------------------
+        # Pilot phase
+        # --------------------------------------------------
+        if start_iter < pilot_ndraws:
+            pilot_to_run = pilot_ndraws - start_iter
+            logger.info(
+                "Running pilot phase for %d steps (target total iteration=%d).",
+                pilot_to_run, pilot_ndraws
+            )
+
+            for _ in sampler.sample(p0, iterations=pilot_to_run, progress=True, thin=thin):
+                pass
+
+            pilot_summary = self.summarize_acceptance(sampler, label="Pilot")
+
+            trigger_fallback = False
+            if pilot_summary is not None and pilot_summary["mean"] < acceptance_threshold:
+                trigger_fallback = True
+                logger.warning(
+                    "Pilot mean acceptance fraction %.4f < %.2f; switching to fallback move mix.",
+                    pilot_summary["mean"], acceptance_threshold
                 )
-                if param != "sigma_lnf":
-                    self.bundle.set_value(param, value=param_value)
 
-            # Run PHOEBE computations
-            if "ellcbackend" in self.bundle.computes:
-                self.bundle.run_compute(compute="ellcbackend", model="latest")
-            elif "fastcompute" in self.bundle.computes:
-                self.bundle.run_compute(compute="fastcompute", model="latest")
+            if trigger_fallback:
+                did_fallback_restart = True
+                p0_restart = backend.get_chain()[-1]
+
+                fallback_moves = self.get_fallback_moves(ndim)
+                sampler = self.build_sampler(
+                    nwalkers=nwalkers,
+                    ndim=ndim,
+                    backend=backend,
+                    moves=fallback_moves,
+                    logit_q_init=logit_q_init,
+                    asini_init=asini_init,
+                    period_init=period_init,
+                    log_dist_init=log_dist_init,
+                    t0=t0,
+                    log_Msum_init=log_Msum_init,
+                    teff1_init=teff1_init,
+                    ecc=ecc,
+                    use_ellc=use_ellc,
+                    pool=pool,
+                    lc_coeff=lc_coeff,
+                    rv_coeff=rv_coeff,
+                    sed_coeff=sed_coeff,
+                    prior_info=prior_info,
+                )
+                logger.info("Fallback sampler moves: %s", sampler._moves)
+
+                logger.info(
+                    "Running fallback assessment block for %d steps to evaluate whether acceptance improves.",
+                    pilot_ndraws
+                )
+
+                af_before = np.asarray(sampler.acceptance_fraction, dtype=float).copy()
+
+                for _ in sampler.sample(p0_restart, iterations=pilot_ndraws, progress=True, thin=thin):
+                    pass
+
+                af_after = np.asarray(sampler.acceptance_fraction, dtype=float)
+                delta_af = af_after - af_before
+
+                logger.info(
+                    "Fallback assessment: mean Δacceptance_fraction=%.4f, median Δ=%.4f",
+                    float(np.mean(delta_af)),
+                    float(np.median(delta_af)),
+                )
+                self.summarize_acceptance(sampler, label="Post-fallback")
             else:
-                self.bundle.run_compute(model="latest")
+                logger.info("Pilot acceptance looks acceptable; keeping default move mix.")
 
-            # SED handling
-            if "sed" in self.data_dict:
-                sed_obj = binarysed.SED(self.data_dict["sed"])
-                teff_primary = self.bundle.get_value("teff@primary@component")
-                teff_secondary = self.bundle.get_value("teff@secondary@component")
-                requiv_primary = self.bundle.get_value("requiv@primary@component")
-                requiv_secondary = self.bundle.get_value("requiv@secondary@component")
-                logg1 = self.bundle.get_value("logg@primary@component")
-                logg2 = self.bundle.get_value("logg@secondary@component")
+        else:
+            logger.info(
+                "Backend already has %d iterations; skipping pilot phase.",
+                start_iter
+            )
+            self.summarize_acceptance(sampler, label="Existing chain")
 
-                fig, ax = sed_obj.plot_sed_and_model(
-                    teff_primary,
-                    teff_secondary,
-                    requiv_primary,
-                    requiv_secondary,
-                    logg1,
-                    logg2,
-                    fig=fig,
-                    ax=ax,
-                )
+        # --------------------------------------------------
+        # Production phase with autocorrelation-based
+        # stopping heuristic
+        # --------------------------------------------------
+        logger.info("Running production sampling with autocorrelation-based stopping checks...")
 
-            # Extract and store LC/RV model output
-            model_output = self.bundle.get_value("fluxes@model@latest")
-            model_outputs.append(model_output)
+        remaining = max_n - backend.iteration
+        if remaining <= 0:
+            logger.warning(
+                "Backend iteration (%d) already >= max_n (%d); returning sampler.",
+                backend.iteration, max_n
+            )
+            return sampler
 
-        # Save the SED plot if available
-        if "sed" in self.data_dict:
-            fig.savefig("../ppcs/ppc_plot_sed.jpg")
+        p0_production = backend.get_chain()[-1]
 
-        # Plot the observed vs predicted data for each dataset
-        model_phases = self.bundle.to_phase(self.bundle.get_value("times@model@latest"))
-
-        for dataset in self.data_dict:
-            if dataset == "sed":
+        for _ in sampler.sample(p0_production, iterations=remaining, progress=True, thin=thin):
+            if sampler.iteration < burn_in:
                 continue
 
-            if dataset.startswith("lc"):
-                obs_data = self.data_dict[dataset]["data"]
-                model_fluxes = self.bundle.get_value("fluxes@model@latest")
+            if sampler.iteration % (50 * thin) == 0:
+                try:
+                    tau = sampler.get_autocorr_time(tol=0)
+                except emcee.autocorr.AutocorrError:
+                    logger.warning("Autocorrelation time could not be estimated reliably.")
+                    continue
 
-                # Plot observed vs predicted light curve
-                fig, ax = plt.subplots(figsize=(12, 8))
+                if index < len(autocorr):
+                    autocorr[index] = np.mean(tau)
+                    index += 1
+
+                crit_50tau = np.all(tau * 50 < sampler.iteration)
+                crit_stable = np.all(np.abs(old_tau - tau) / tau < 0.01)
+                stopping_reached = crit_50tau and crit_stable
+
+                logger.info(
+                    "Stopping check at iter=%d: mean_tau=%.2f, max_tau=%.2f, "
+                    "criterion_50tau=%s, criterion_stable=%s",
+                    sampler.iteration,
+                    float(np.mean(tau)),
+                    float(np.max(tau)),
+                    crit_50tau,
+                    crit_stable,
+                )
+
+                if stopping_reached:
+                    logger.info("Autocorrelation-based stopping criterion reached.")
+                    break
+
+                old_tau = tau
+
+        final_summary = self.summarize_acceptance(sampler, label="Final")
+        if did_fallback_restart and final_summary is not None:
+            logger.info(
+                "Run finished after fallback restart. Final mean acceptance fraction: %.4f",
+                final_summary["mean"]
+            )
+
+        return sampler
+    
+    def set_run_dir(self, prev_run_dir=None, new_name=None):
+        if prev_run_dir is None:
+            run_dir = os.path.join(self.trace_dir, f"run_{new_name}")
+            os.makedirs(run_dir, exist_ok=True)
+            self.run_dir = run_dir
+        else:
+            self.run_dir = prev_run_dir
+
+    def save_trace(self, sampler):
+
+        # Save sampler chain and other attributes
+        np.save(os.path.join(self.run_dir, "chain.npy"), sampler.get_chain())
+        np.save(os.path.join(self.run_dir, "log_prob.npy"), sampler.get_log_prob())
+        np.save(os.path.join(self.run_dir, "sampler_state.npy"), sampler.get_last_sample())
+        logger.info("Trace saved to %s", self.run_dir)
+
+    def check_convergence(self, sampler):
+        """Checks convergence by estimating the integrated autocorrelation time."""
+        tau = sampler.get_autocorr_time(tol=0)
+        return tau
+
+    def posterior_predictive_checks(self, sampler):
+        """Implements posterior predictive checks using sampled parameters."""
+        pass
