@@ -525,8 +525,8 @@ def lnprior(params, u_q_init, asini_init, period, log_dist_init, log_Msum_init, 
     logrho2 = log10_density_solar(M2, requiv2)
 
     # Broad sanity prior: only penalize absurdly high densities
-    log_prior_density1 = soft_density_cap(logrho1, upper=2.3, k=3.0)
-    log_prior_density2 = soft_density_cap(logrho2, upper=2.3, k=3.0)
+    log_prior_density1 = soft_density_cap(logrho1, upper=2.3, sigma=0.3)
+    log_prior_density2 = soft_density_cap(logrho2, upper=2.3, sigma=0.3)
 
     sigma_teff1 = 700
     log_prior_teff1 = -0.5 * ((teff1 - teff1_init) / sigma_teff1)**2
